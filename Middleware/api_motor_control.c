@@ -184,6 +184,26 @@ int8_t API_MOTOR_GetCurrentSpeed(API_MOTOR_Num_t motor)
 }
 
 /**
+  * @brief  M1 推杆电机限位/急停保护，需每 1ms 调用一次
+  * @retval None
+  * @note   详见 api_motor_control.h 中的说明
+  */
+void API_MOTOR_CheckLimit(void)
+{
+    int8_t speed = g_motor_state[API_MOTOR_1].current_speed;
+    if (speed == 0) return;
+
+    uint8_t cur_dir = (speed > 0) ? 1u : 0u;  // 1=正转，0=反转
+    uint8_t hit = (((!IN_READ(7) || !IN_READ(9)) && cur_dir) || (!IN_READ(8) && !cur_dir));
+    if (!IN_READ(19)) hit = 1;  // 急停按钮
+
+    if (hit)
+    {
+        API_MOTOR_Stop(API_MOTOR_1);
+    }
+}
+
+/**
   * @brief  获取当前加减速步进参数
   * @return 步进百分比
   */

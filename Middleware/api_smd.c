@@ -8,13 +8,16 @@
   *            - 上电回原点状态机（SMD_SysToOrigin）与限位急停（SMD_IsLimited）：
   *              沿用原项目对应机械结构（进退/升降/夹爪）的判定逻辑，
   *              IN/OUT 序号沿用原项目编号，需与实际线束核对
-  *            - 继电器电机（原 OUT12/13 独立限位）：新板已改为独立PWM+H桥驱动
-  *              （见 api_motor_control.c），故未移植该部分限位逻辑
+  *            - 继电器电机（原 OUT12/13 通过继电器正反转驱动的推杆电机）：
+  *              新板已改为 M1 独立 PWM+MOS桥驱动，对应限位急停逻辑已移植到
+  *              api_motor_control.c 的 API_MOTOR_CheckLimit()，同样在本文件的
+  *              TIM10 1ms中断里调用
   * @version V2.0.0
   * @date    09-Sep-2026
   */
 #include "api_smd.h"
 #include "tim.h"
+#include "api_motor_control.h"
 #include <math.h>
 
 /* ========================= 硬件定时器映射表 ========================= */
@@ -688,6 +691,7 @@ static void SMD_ProcessChannel(SMD_Channel ch)
  *   1. 对每个通道调用 SMD_ProcessChannel()（换向/限位检测 + S曲线一步）
  *   2. 对支持步数控制的通道做步数控制决策 SMD_MotorStepsCtl()
  *   3. 推进"回原点"状态机 SMD_SysToOrigin()
+ *   4. M1 推杆电机的独立限位/急停保护 API_MOTOR_CheckLimit()
  */
 void TIM1_UP_TIM10_IRQHandler(void)
 {
@@ -701,6 +705,8 @@ void TIM1_UP_TIM10_IRQHandler(void)
         SMD_MotorStepsCtl((SMD_Channel)ch);
 
     SMD_SysToOrigin();
+
+    API_MOTOR_CheckLimit();
 }
 
 /*----------------------------- End of file -------------------------------*/

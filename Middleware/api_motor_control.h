@@ -99,6 +99,22 @@ void API_MOTOR_Stop(API_MOTOR_Num_t motor);
 int8_t API_MOTOR_GetCurrentSpeed(API_MOTOR_Num_t motor);
 
 /**
+  * @brief  M1 推杆电机限位/急停保护，需每 1ms 调用一次
+  * @retval None
+  * @note   移植自旧板 slj_stm32f407 的 SMD_CheckRelayMotorLimit()：旧板通过
+  *         RELAY_MOTOR_1/RELAY_MOTOR_2 两路继电器正反转驱动同一台推杆电机，
+  *         新板已改为 M1 独立 PWM+MOS 桥驱动，故限位逻辑仅作用于 API_MOTOR_1，
+  *         用当前速度符号代替旧板"读继电器方向"作为运行方向判断：
+  *           IN8(索引7)/IN10(索引9)：正转方向限位
+  *           IN9(索引8)：反转方向限位
+  *           IN20(索引19)：全局急停
+  *         IN 序号沿用旧板编号，需与实际接线核实。仅当电机正在运行
+  *         （速度非0）时才检测，触发后立即调用 API_MOTOR_Stop(API_MOTOR_1)。
+  *         M2 未接限位开关，不做限位保护。
+  */
+void API_MOTOR_CheckLimit(void);
+
+/**
   * @brief  BSP 定时器 10ms 中的速度更新函数
   * @retval None
   * @note   在 main.c 的 BSP 定时器回调中调用

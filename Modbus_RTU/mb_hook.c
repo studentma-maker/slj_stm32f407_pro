@@ -78,14 +78,12 @@ void mbs_hook_updata_holding(mbs *_mbs)
     for (int i = 0; i < SMD_CH_MAX; i++)
     {
         _mbs->regHoldingBuf[SMD_1_AM_ADDR  + i * 10] = SMD_AM_READ(i);
-        _mbs->regHoldingBuf[SMD_1_EN_ADDR  + i * 10] = SMD_EN_READ(i);
         _mbs->regHoldingBuf[SMD_1_DR_ADDR  + i * 10] = SMD_DR_READ(i);
         _mbs->regHoldingBuf[SMD_1_ACC_ADDR + i * 10] = SMD_ACC_DATA[i];
         _mbs->regHoldingBuf[SMD_1_JRK_ADDR + i * 10] = (uint16_t)(SMD_JERK_DATA[i] > 65535u ? 65535u : SMD_JERK_DATA[i]);
         /* STEP：步数控制触发寄存器（只写，回读始终为 0） */
         _mbs->regHoldingBuf[SMD_1_STEP_ADDR + i * 10] = 0;
         _mbs->regHoldingBuf[SMD_1_PU_ADDR  + i * 10] = SMD_PU_DATA[i];
-        _mbs->regHoldingBuf[SMD_1_CS_ADDR  + i * 10] = MotorCurStepsU[i];
         /* SP：实时速度，主机可读取当前运行频率 */
         _mbs->regHoldingBuf[SMD_1_SP_ADDR  + i * 10] = (uint16_t)smd_freq_gradient[i].current_freq_int;
     }
@@ -103,7 +101,10 @@ void mbs_hook_updata_holding(mbs *_mbs)
     _mbs->regHoldingBuf[MOTOR_1_CURRENT_SP_ADDR] = API_MOTOR_GetCurrentSpeed(API_MOTOR_1);
     _mbs->regHoldingBuf[MOTOR_2_CURRENT_SP_ADDR] = API_MOTOR_GetCurrentSpeed(API_MOTOR_2);
 
-    _mbs->regHoldingBuf[SYS_TO_ORIGIN_ADDR] = g_sysToOrigin;
+    _mbs->regHoldingBuf[SYS_TO_ORIGIN_ADDR]     = g_sysToOrigin;
+    /* 仅夹爪、进退两路支持步数控制的电机开放当前步数只读回读，与旧板一致 */
+    _mbs->regHoldingBuf[GRIPPER_CUR_STEPS_ADDR] = MotorCurStepsU[MOTOR_GripperMove];
+    _mbs->regHoldingBuf[FBACK_CUR_STEPS_ADDR]   = MotorCurStepsU[MOTOR_FBack];
 }
 
 /**
@@ -114,7 +115,6 @@ void mbs_hook_updata_holding(mbs *_mbs)
   * @retval None
   *
   * 寄存器写入行为说明：
-  *  EN   ：直接透传到 SMD_EN 引脚（使能/禁能驱动器）
   *  DR   ：设置 dir_change 标志（S曲线换向保护），步数模式下忽略
   *  ACC  ：更新最大加速度，所有模式下均可写入，限幅 SMD_ACC_MAX_MIN~MAX
   *  JRK  ：更新 jerk 值（Hz/s²），写 0 自动恢复 SMD_JERK_DEFAULT
@@ -133,12 +133,6 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
 
     for (int i = 0; i < SMD_CH_MAX; i++)
     {
-        /* --- EN写入：直接透传 --- */
-        if (_mbs->regHoldingBuf[SMD_1_EN_ADDR + i * 10] != SMD_EN_READ(i))
-        {
-            SMD_EN(i, _mbs->regHoldingBuf[SMD_1_EN_ADDR + i * 10]);
-        }
-
         /* --- 方向控制（步数模式下忽略，方向由步数差自动决定） --- */
         if (!g_motorStepsCtl[i].is_running)
         {
