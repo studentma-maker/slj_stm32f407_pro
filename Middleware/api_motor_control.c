@@ -184,22 +184,27 @@ int8_t API_MOTOR_GetCurrentSpeed(API_MOTOR_Num_t motor)
 }
 
 /**
-  * @brief  M1 推杆电机限位/急停保护，需每 1ms 调用一次
+  * @brief  推杆电机限位/急停保护，需每 1ms 调用一次
   * @retval None
-  * @note   详见 api_motor_control.h 中的说明
+  * @note   M1/M2 是同一台电机的双路冗余接线（哪路 MOS 桥烧了就把电机接线
+  *         换到另一路，程序不用改），所以两路受完全相同的限位/急停信号
+  *         保护，分别独立判断、独立停止，详见 api_motor_control.h 中的说明
   */
 void API_MOTOR_CheckLimit(void)
 {
-    int8_t speed = g_motor_state[API_MOTOR_1].current_speed;
-    if (speed == 0) return;
-
-    uint8_t cur_dir = (speed > 0) ? 1u : 0u;  // 1=正转，0=反转
-    uint8_t hit = (((!IN_READ(7) || !IN_READ(9)) && cur_dir) || (!IN_READ(8) && !cur_dir));
-    if (!IN_READ(19)) hit = 1;  // 急停按钮
-
-    if (hit)
+    for (API_MOTOR_Num_t m = API_MOTOR_1; m <= API_MOTOR_2; m++)
     {
-        API_MOTOR_Stop(API_MOTOR_1);
+        int8_t speed = g_motor_state[m].current_speed;
+        if (speed == 0) continue;
+
+        uint8_t cur_dir = (speed > 0) ? 1u : 0u;  // 1=正转，0=反转
+        uint8_t hit = (((!IN_READ(7) || !IN_READ(9)) && cur_dir) || (!IN_READ(8) && !cur_dir));
+        if (!IN_READ(19)) hit = 1;  // 急停按钮
+
+        if (hit)
+        {
+            API_MOTOR_Stop(m);
+        }
     }
 }
 

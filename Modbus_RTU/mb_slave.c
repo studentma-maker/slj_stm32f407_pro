@@ -295,7 +295,7 @@ static void mods_05h(mbs *_mbs)
     }
 
     /* 如果改变的数据在寄存器范围内,则设置线圈状态 */
-    if (reg <= REG_COILS_SIZE)
+    if (reg < REG_COILS_SIZE)
     {
         if(value)
         {
@@ -373,7 +373,7 @@ void mods_06h(mbs *_mbs)
     value = ((uint16_t)_mbs->rxBuf[4] << 8) | _mbs->rxBuf[5];  /* 寄存器值 */
 
     /* 如果改变的数据在寄存器范围内,则写入寄存器数据 */
-    if (reg <= REG_HOLDING_NREGS)
+    if (reg < REG_HOLDING_NREGS)
     {
         mbs_hook_extract_holding(_mbs, reg, value); /* 写入寄存器数据 */
     }
@@ -456,7 +456,7 @@ void mods_0fh(mbs *_mbs)
         value = _mbs->rxBuf[7 + i / 8];   /* 逐个取出寄存器字节数据 */
 
         /* 如果改变的数据在寄存器范围内,则设置线圈状态 */
-        if (reg_addr <= REG_COILS_SIZE)
+        if (reg_addr < REG_COILS_SIZE)
         {
             /* 判断字节数据的每一位 */
             if((value >> (i % 8)) & 0x01)
@@ -552,7 +552,7 @@ void mods_10h(mbs *_mbs)
         value = ((uint16_t)_mbs->rxBuf[7 + 2 * i] << 8) | _mbs->rxBuf[8 + 2 * i];  /* 寄存器值 */
 
         /* 如果改变的数据在寄存器范围内,则写入寄存器数据 */
-        if ((reg_addr <= REG_HOLDING_NREGS))
+        if ((reg_addr < REG_HOLDING_NREGS))
         {
             mbs_hook_extract_holding(_mbs, reg_addr, value);  /* 写入寄存器数据 */
             reg_addr++;  /* 累加寄存器地址,直到读取完所有数据 */

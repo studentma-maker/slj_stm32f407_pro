@@ -31,6 +31,18 @@ static int8_t mb_hook_decode_relay_pair(uint16_t fwd, uint16_t rev)
 }
 
 /**
+  * @brief  同时设置 M1、M2 目标速度
+  * @note   新板 M1/M2 两路 MOS 桥硬件上是同一台电机的双路冗余接线（哪路桥
+  *         烧了就把电机接线换到另一路，程序不用改），所以两路必须收到完全
+  *         相同的控制指令，不能只驱动其中一路。
+  */
+static void mb_hook_set_cart_speed(int8_t speed)
+{
+    API_MOTOR_SetSpeed(API_MOTOR_1, speed);
+    API_MOTOR_SetSpeed(API_MOTOR_2, speed);
+}
+
+/**
   * @brief  寄存器槽位(0~7) -> 物理步进通道(SMD_Channel, 0~5) 查找表
   * @note   由 mb_hook.h 里的 SMD_SLOT_x_PHYS_CH 宏（1~6=物理通道号，0=未接线）
   *         转换而来，-1 表示该槽位没有对应的物理通道。改接线只需要改
@@ -158,8 +170,10 @@ void mbs_hook_updata_holding(mbs *_mbs)
   *  STEP ：写入目标步数，进入步数控制模式（须在 PU 之前写入）
   *  PU   ：非步数模式→启动S曲线；步数模式→更新最大脉冲频率
   *  SP   ：写 0=急停；写 N>1=直接跳变到 N Hz
-  *  OUT13/14、OUT15/16：兼容旧板继电器协议，分别解码为 M1/M2 目标速度
-  *                       （详见 mb_hook_decode_relay_pair()）
+  *  OUT13/14/15/16：兼容旧板"继电器料车电机"协议，13/14为主继电器对、
+  *                   15/16为其冗余复制，四者统一解码后同步驱动 M1+M2
+  *                   （M1/M2 是同一台电机的双路冗余接线，详见
+  *                   mb_hook_decode_relay_pair() / mb_hook_set_cart_speed()）
   */
 void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
 {
@@ -293,25 +307,28 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
         }
     }
 
+    /* M1/M2 是同一台电机的双路冗余接线（哪路 MOS 桥烧了就换接到另一路，
+     * 程序不用改），所以无论上位机通过哪一组寄存器下发速度，都必须同时
+     * 驱动 M1 和 M2：
+     *   - MOTOR_1_TARGET_SP_ADDR / MOTOR_2_TARGET_SP_ADDR：新增的直接调速
+     *     寄存器，两个地址等价，写任意一个都会同步到两路
+     *   - OUT13/14/15/16：兼容旧板"继电器控制料车电机"协议，13/14 是主
+     *     继电器对，15/16 是上位机对同一信号的冗余复制（onControlRelayMotor()
+     *     里 CartUp/CartDown 永远同时设置这4个寄存器，13与15同值、14与16
+     *     同值），四者统一以13/14解码后同步驱动两路 */
     switch (_reg)
     {
         case MOTOR_1_TARGET_SP_ADDR:
-            API_MOTOR_SetSpeed(API_MOTOR_1, (int8_t)_val);
-            break;
         case MOTOR_2_TARGET_SP_ADDR:
-            API_MOTOR_SetSpeed(API_MOTOR_2, (int8_t)_val);
+            mb_hook_set_cart_speed((int8_t)_val);
             break;
 
-        /* --- 兼容旧板"继电器控制直流电机"协议：OUT13/14控制M1，OUT15/16控制M2 --- */
         case OUT_13_ADDR:
         case OUT_14_ADDR:
-            API_MOTOR_SetSpeed(API_MOTOR_1, mb_hook_decode_relay_pair(
-                _mbs->regHoldingBuf[OUT_13_ADDR], _mbs->regHoldingBuf[OUT_14_ADDR]));
-            break;
         case OUT_15_ADDR:
         case OUT_16_ADDR:
-            API_MOTOR_SetSpeed(API_MOTOR_2, mb_hook_decode_relay_pair(
-                _mbs->regHoldingBuf[OUT_15_ADDR], _mbs->regHoldingBuf[OUT_16_ADDR]));
+            mb_hook_set_cart_speed(mb_hook_decode_relay_pair(
+                _mbs->regHoldingBuf[OUT_13_ADDR], _mbs->regHoldingBuf[OUT_14_ADDR]));
             break;
 
         default: break;

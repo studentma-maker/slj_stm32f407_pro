@@ -691,7 +691,7 @@ static void SMD_ProcessChannel(SMD_Channel ch)
  *   1. 对每个通道调用 SMD_ProcessChannel()（换向/限位检测 + S曲线一步）
  *   2. 对支持步数控制的通道做步数控制决策 SMD_MotorStepsCtl()
  *   3. 推进"回原点"状态机 SMD_SysToOrigin()
- *   4. M1 推杆电机的独立限位/急停保护 API_MOTOR_CheckLimit()
+ *   4. 推杆电机（M1/M2双路冗余）的限位/急停保护 API_MOTOR_CheckLimit()
  */
 void TIM1_UP_TIM10_IRQHandler(void)
 {
