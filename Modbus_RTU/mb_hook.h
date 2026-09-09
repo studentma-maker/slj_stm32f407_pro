@@ -90,28 +90,7 @@
 #define SMD_6_CS_ADDR              57       /* 当前步数 */
 #define SMD_6_SP_ADDR              58       /* 实时速度控制 */
 
-#define IN_1_ADDR                  60       /* 输入信号 */
-#define IN_2_ADDR                  61       /* 输入信号 */
-#define IN_3_ADDR                  62       /* 输入信号 */
-#define IN_4_ADDR                  63       /* 输入信号 */
-#define IN_5_ADDR                  64       /* 输入信号 */
-#define IN_6_ADDR                  65       /* 输入信号 */
-#define IN_7_ADDR                  66       /* 输入信号 */
-#define IN_8_ADDR                  67       /* 输入信号 */
-#define IN_9_ADDR                  68       /* 输入信号 */
-#define IN_10_ADDR                 69       /* 输入信号 */
-#define IN_11_ADDR                 70       /* 输入信号 */
-#define IN_12_ADDR                 71       /* 输入信号 */
-#define IN_13_ADDR                 72       /* 输入信号 */
-#define IN_14_ADDR                 73       /* 输入信号 */
-#define IN_15_ADDR                 74       /* 输入信号 */
-#define IN_16_ADDR                 75       /* 输入信号 */
-#define IN_17_ADDR                 76       /* 输入信号 */
-#define IN_18_ADDR                 77       /* 输入信号 */
-#define IN_19_ADDR                 78       /* 输入信号 */
-#define IN_20_ADDR                 79       /* 输入信号 */
-
-#define OUT_1_ADDR                 80      /* 输出信号 */
+#define OUT_1_ADDR                 80      /* 输出信号，地址与旧板 slj_stm32f407 一致 */
 #define OUT_2_ADDR                 81      /* 输出信号 */
 #define OUT_3_ADDR                 82      /* 输出信号 */
 #define OUT_4_ADDR                 83      /* 输出信号 */
@@ -124,12 +103,38 @@
 #define OUT_11_ADDR                90      /* 输出信号 */
 #define OUT_12_ADDR                91      /* 输出信号 */
 
+/* 92~99 预留（旧板此区间为 EC_CLEAR/EC/ADC，新板未实现该功能，暂不使用） */
+
+/* M1/M2 直流电机调速：旧板无此功能，没有对应的旧地址，暂沿用原有取值 */
 #define MOTOR_1_TARGET_SP_ADDR     100     /* 电机1目标速度（可读可写） */
 #define MOTOR_1_CURRENT_SP_ADDR    101     /* 电机1当前速度（只读） */
 #define MOTOR_2_TARGET_SP_ADDR     102     /* 电机2目标速度（可读可写） */
 #define MOTOR_2_CURRENT_SP_ADDR    103     /* 电机2当前速度（只读） */
 
-#define SYS_TO_ORIGIN_ADDR         104     /* 系统上电回原点状态（只读，对应 GrippertoOrigin_P 枚举） */
+/* 104~111 预留 */
+
+#define IN_1_ADDR                  112      /* 输入信号，地址与旧板 slj_stm32f407 一致 */
+#define IN_2_ADDR                  113      /* 输入信号 */
+#define IN_3_ADDR                  114      /* 输入信号 */
+#define IN_4_ADDR                  115      /* 输入信号 */
+#define IN_5_ADDR                  116      /* 输入信号 */
+#define IN_6_ADDR                  117      /* 输入信号 */
+#define IN_7_ADDR                  118      /* 输入信号 */
+#define IN_8_ADDR                  119      /* 输入信号 */
+#define IN_9_ADDR                  120      /* 输入信号 */
+#define IN_10_ADDR                 121      /* 输入信号 */
+#define IN_11_ADDR                 122      /* 输入信号 */
+#define IN_12_ADDR                 123      /* 输入信号 */
+#define IN_13_ADDR                 124      /* 输入信号 */
+#define IN_14_ADDR                 125      /* 输入信号 */
+#define IN_15_ADDR                 126      /* 输入信号 */
+#define IN_16_ADDR                 127      /* 输入信号 */
+#define IN_17_ADDR                 128      /* 输入信号 */
+#define IN_18_ADDR                 129      /* 输入信号 */
+#define IN_19_ADDR                 130      /* 输入信号 */
+#define IN_20_ADDR                 131      /* 输入信号 */
+
+#define SYS_TO_ORIGIN_ADDR         133     /* 系统上电回原点状态（只读，对应 GrippertoOrigin_P 枚举），地址与旧板 SYS_TO_ORIGIN 一致 */
 
 #define STOP_ALL_MOTOR_ADDR        (REG_HOLDING_NREGS - 1) /* 全部步进电机急停（写1触发） */
 
