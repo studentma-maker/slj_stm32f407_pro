@@ -34,9 +34,14 @@
  *     暴露；SMD_EN/SMD_EN_READ 宏仍保留在 main.h，硬件层面按 GPIO 复位后的
  *     默认电平工作，如后续确认驱动器使能极性，可再决定是否需要固件主动置位。
  *   - CS：并非所有电机都支持步数控制，因此不作为逐路通用字段。仅
- *     MOTOR_FBack / MOTOR_UpDown / MOTOR_GripperMove 三路支持步数控制的
- *     电机，各自使用扩展状态区的专用寄存器回读当前步数（见下方
- *     GRIPPER_CUR_STEPS / UPDOWN_CUR_STEPS / FBACK_CUR_STEPS，地址与旧板一致）。
+ *     MOTOR_FBack / MOTOR_GripperMove 两路支持步数控制的电机，各自使用
+ *     扩展状态区的专用寄存器回读当前步数（见下方 GRIPPER_CUR_STEPS_ADDR /
+ *     FBACK_CUR_STEPS_ADDR，地址与旧板一致）。
+ *
+ * 上位机把电机寄存器分成 8 个槽位（对应旧板 8 路电机），但新板只有 6 路
+ * 物理步进通道。槽位地址（SMD_1~8_xxx_ADDR / SMD_SLOT_xxx_ADDR(slot)）与
+ * 物理通道（SMD_CH0~SMD_CH5）之间的转接关系由本文件下方的
+ * SMD_SLOT_x_PHYS_CH 系列宏统一定义，改接线只需要改那几个数字。
  *------------------------------------------------------------------------*/
 #define SMD_1_AM_ADDR              0        /* 报警信号 */
 #define SMD_1_DR_ADDR              1        /* 方向控制 */
@@ -86,6 +91,66 @@
 #define SMD_6_PU_ADDR              55       /* 频率控制 */
 #define SMD_6_SP_ADDR              56       /* 实时速度控制 */
 
+/* 槽位7、8：新板没有对应的物理通道，但上位机协议（reg_map.h）里这两组地址
+ * 依然存在（MOTOR_7 保留未用，MOTOR_8 被 onControlFeedSpeed() 用作"送发辅助
+ * 电机"），必须占住这两段地址空间，写入才能落到正确的寄存器上 */
+#define SMD_7_AM_ADDR              60       /* 报警信号（未使用） */
+#define SMD_7_DR_ADDR              61
+#define SMD_7_ACC_ADDR             62
+#define SMD_7_JRK_ADDR             63
+#define SMD_7_STEP_ADDR            64
+#define SMD_7_PU_ADDR              65
+#define SMD_7_SP_ADDR              66
+
+#define SMD_8_AM_ADDR              70       /* 报警信号 */
+#define SMD_8_DR_ADDR              71       /* 方向控制 */
+#define SMD_8_ACC_ADDR             72       /* 加速度控制 */
+#define SMD_8_JRK_ADDR             73       /* Jerk控制 */
+#define SMD_8_STEP_ADDR            74       /* 步数控制 */
+#define SMD_8_PU_ADDR              75       /* 频率控制 */
+#define SMD_8_SP_ADDR              76       /* 实时速度控制 */
+
+/* 通用槽位地址函数宏：slot = 0~7（对应上位机的电机1~8），
+ * 效果和上面 8 组具名宏一一对应，供 mb_hook.c 里按槽位遍历时使用 */
+#define SMD_SLOT_REG_BASE(slot)    ((slot) * 10)
+#define SMD_SLOT_AM_ADDR(slot)     (SMD_SLOT_REG_BASE(slot) + 0)
+#define SMD_SLOT_DR_ADDR(slot)     (SMD_SLOT_REG_BASE(slot) + 1)
+#define SMD_SLOT_ACC_ADDR(slot)    (SMD_SLOT_REG_BASE(slot) + 2)
+#define SMD_SLOT_JRK_ADDR(slot)    (SMD_SLOT_REG_BASE(slot) + 3)
+#define SMD_SLOT_STEP_ADDR(slot)   (SMD_SLOT_REG_BASE(slot) + 4)
+#define SMD_SLOT_PU_ADDR(slot)     (SMD_SLOT_REG_BASE(slot) + 5)
+#define SMD_SLOT_SP_ADDR(slot)     (SMD_SLOT_REG_BASE(slot) + 6)
+
+/* ==================== 寄存器槽位(1~8) -> 板上物理步进通道(1~6)接线映射 ====================
+ * 上位机 Modbus 协议按旧板 8 路电机划分寄存器槽位（slj_kickpi_qt_pro 的
+ * common/reg_map.h），新板只有 6 路物理步进通道。改接线只需要改下面这 8 个
+ * 数字，不用碰 mb_hook.c 里的任何逻辑。取值 1~6 表示接到板上第几路（对应
+ * api_smd.h 的 SMD_CH0~SMD_CH5，下标=数值-1）；取值 0 表示该槽位没有实际
+ * 接线，下位机忽略对应寄存器的写入。
+ *
+ * 当前取值来自与你确认过的接线关系（2026-09 核对上位机 mainworker.cpp 源码）：
+ *   - 槽位1（MOTOR_PaiFa 自身地址）：上位机 onControlMotor() 里排发电机的命令
+ *     被重映射发到了槽位6（MOTOR_Feed）的地址，槽位1这段地址上位机实际不发，
+ *     设为 0（不接线），避免和槽位6同时驱动1号通道产生冲突
+ *   - 槽位2（MOTOR_Trans 送发）：上位机直接用自己的地址发送，不重映射 → 直连2号
+ *   - 槽位3（MOTOR_FBack 进退）：上位机直连，不重映射 → 直连3号
+ *   - 槽位4（MOTOR_UpDown 升降）：上位机未见实际使用，先按直连4号处理
+ *   - 槽位5（MOTOR_GripperMove 夹爪）：上位机直连，不重映射 → 直连5号
+ *   - 槽位6（MOTOR_Feed 上料）：上位机排发电机命令实际发到这里 → 转接到1号
+ *   - 槽位7：上位机未使用 → 不接线
+ *   - 槽位8（MOTOR_8，onControlFeedSpeed 里的送发辅助电机）→ 转接到6号
+ */
+#define SMD_SLOT_1_PHYS_CH        0   /* 排发自身地址，上位机实际不发，不接线 */
+#define SMD_SLOT_2_PHYS_CH        2   /* 送发 Trans，直连2号 */
+#define SMD_SLOT_3_PHYS_CH        3   /* 进退 FBack，直连3号 */
+#define SMD_SLOT_4_PHYS_CH        4   /* 升降 UpDown，直连4号 */
+#define SMD_SLOT_5_PHYS_CH        5   /* 夹爪 GripperMove，直连5号 */
+#define SMD_SLOT_6_PHYS_CH        1   /* 上料 Feed：排发命令实际落在这里，转接到1号 */
+#define SMD_SLOT_7_PHYS_CH        0   /* 未使用，不接线 */
+#define SMD_SLOT_8_PHYS_CH        6   /* 送发辅助电机，转接到6号 */
+
+#define SMD_SLOT_COUNT             8
+
 #define OUT_1_ADDR                 80      /* 输出信号，地址与旧板 slj_stm32f407 一致 */
 #define OUT_2_ADDR                 81      /* 输出信号 */
 #define OUT_3_ADDR                 82      /* 输出信号 */
@@ -99,9 +164,21 @@
 #define OUT_11_ADDR                90      /* 输出信号 */
 #define OUT_12_ADDR                91      /* 输出信号 */
 
-/* 92~99 预留（旧板此区间为 EC_CLEAR/EC/ADC，新板未实现该功能，暂不使用） */
+/* 92~95：兼容旧板"继电器控制直流电机"协议，地址与旧板 OUT_13~16_ADDR 一致。
+ * 旧板上 13/14 为一组继电器控制一台推杆电机，15/16 为另一组控制另一台，
+ * 上位机通过写 0/1 组合控制通断实现启停+换向：
+ *   13=1,14=0 → 正转；13=0,14=1 → 反转；13=0,14=0（或13=1,14=1）→ 停止
+ * 新板没有这两组物理继电器，这 4 个寄存器只是协议兼容层：写入后由
+ * mbs_hook_extract_holding() 解码，转换成对 M1（对应13/14）、
+ * M2（对应15/16）的 API_MOTOR_SetSpeed(...,100/-100/0) 调用，不驱动任何
+ * 实际 GPIO，OUT_READ()/OUT() 也不覆盖这 4 个地址（新板 OUT 只有 1~12）。 */
+#define OUT_13_ADDR                92      /* M1正转继电器位（协议兼容，无实际GPIO） */
+#define OUT_14_ADDR                93      /* M1反转继电器位（协议兼容，无实际GPIO） */
+#define OUT_15_ADDR                94      /* M2正转继电器位（协议兼容，无实际GPIO） */
+#define OUT_16_ADDR                95      /* M2反转继电器位（协议兼容，无实际GPIO） */
 
-/* M1/M2 直流电机调速：旧板无此功能，没有对应的旧地址，暂沿用原有取值 */
+/* M1/M2 直流电机调速：新增的直接调速寄存器（-100~100），与上面 13~16
+ * 继电器兼容寄存器共用同一套 API_MOTOR_SetSpeed() 底层实现 */
 #define MOTOR_1_TARGET_SP_ADDR     100     /* 电机1目标速度（可读可写） */
 #define MOTOR_1_CURRENT_SP_ADDR    101     /* 电机1当前速度（只读） */
 #define MOTOR_2_TARGET_SP_ADDR     102     /* 电机2目标速度（可读可写） */

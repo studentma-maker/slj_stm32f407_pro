@@ -133,13 +133,9 @@ int main(void)
 
             uint8_t data[] = {0, 1, 0, 10};
             mbh_send(&mbhMCU, 1, 3, data, 4);
-        }
-        
-        if (bsp_timer_IsFlagSet(BSP_TIMER_FLAG_100MS))
-        {
-            bsp_timer_ClearFlag(BSP_TIMER_FLAG_100MS);
 
-            /* 更新电机速度（非阻塞式） */
+            /* 更新电机速度（非阻塞式）：由100ms周期改为10ms，配合默认2%步进，
+             * 0->100%加减速时间从5秒缩短到0.5秒 */
             API_MOTOR_UpdateSpeed();
         }
 

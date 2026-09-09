@@ -84,7 +84,11 @@ typedef enum {
     SMD_CH4 = 4,  // PA2 - TIM9_CH1 (普通PWM通道) / SMD_DR_5,EN_5,AM_5
     MOTOR_GripperMove = SMD_CH4,    // 夹爪移动电机（步数控制）
     SMD_CH5 = 5,  // PA1 - TIM2_CH2 (普通PWM通道) / SMD_DR_6,EN_6,AM_6
-    MOTOR_Feed = SMD_CH5,           // 上料电机
+    MOTOR_Feed = SMD_CH5,           // 别名沿用旧板命名，但上位机 Modbus 寄存器槽位6
+                                     // 的地址实际被"排发"命令占用（onControlMotor 里
+                                     // MOTOR_PaiFa 被重映射到 MOTOR_Feed 的地址），真正
+                                     // 驱动本通道(6号物理接口)的是槽位8（送发辅助电机）。
+                                     // 详见 mb_hook.h 的 SMD_SLOT_x_PHYS_CH 系列宏
     SMD_CH_MAX
 } SMD_Channel;
 

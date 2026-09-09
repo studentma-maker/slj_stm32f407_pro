@@ -13,6 +13,40 @@
 #include "api_smd.h"
 #include "api_motor_control.h"
 
+/* 私有函数实现 ------------------------------------------------------------*/
+
+/**
+  * @brief  将"正转继电器位+反转继电器位"解码为目标速度，兼容旧板继电器协议
+  * @param  fwd  正转继电器寄存器值（非0视为1）
+  * @param  rev  反转继电器寄存器值（非0视为1）
+  * @retval 100=正转，-100=反转，0=停止（两位同时为1的非法组合按停止处理）
+  */
+static int8_t mb_hook_decode_relay_pair(uint16_t fwd, uint16_t rev)
+{
+    uint8_t f = (fwd != 0);
+    uint8_t r = (rev != 0);
+    if (f && !r) return 100;
+    if (!f && r) return -100;
+    return 0;
+}
+
+/**
+  * @brief  寄存器槽位(0~7) -> 物理步进通道(SMD_Channel, 0~5) 查找表
+  * @note   由 mb_hook.h 里的 SMD_SLOT_x_PHYS_CH 宏（1~6=物理通道号，0=未接线）
+  *         转换而来，-1 表示该槽位没有对应的物理通道。改接线只需要改
+  *         mb_hook.h 里的宏，这里不用动。
+  */
+static const int8_t smd_slot_phys_ch[SMD_SLOT_COUNT] = {
+    SMD_SLOT_1_PHYS_CH - 1,
+    SMD_SLOT_2_PHYS_CH - 1,
+    SMD_SLOT_3_PHYS_CH - 1,
+    SMD_SLOT_4_PHYS_CH - 1,
+    SMD_SLOT_5_PHYS_CH - 1,
+    SMD_SLOT_6_PHYS_CH - 1,
+    SMD_SLOT_7_PHYS_CH - 1,
+    SMD_SLOT_8_PHYS_CH - 1,
+};
+
 /* 导出函数实现 ------------------------------------------------------------*/
 
 /**
@@ -75,17 +109,20 @@ void mbh_hook_timesErr(uint8_t add, uint8_t cmd, uint8_t data)
   */
 void mbs_hook_updata_holding(mbs *_mbs)
 {
-    for (int i = 0; i < SMD_CH_MAX; i++)
+    for (int slot = 0; slot < SMD_SLOT_COUNT; slot++)
     {
-        _mbs->regHoldingBuf[SMD_1_AM_ADDR  + i * 10] = SMD_AM_READ(i);
-        _mbs->regHoldingBuf[SMD_1_DR_ADDR  + i * 10] = SMD_DR_READ(i);
-        _mbs->regHoldingBuf[SMD_1_ACC_ADDR + i * 10] = SMD_ACC_DATA[i];
-        _mbs->regHoldingBuf[SMD_1_JRK_ADDR + i * 10] = (uint16_t)(SMD_JERK_DATA[i] > 65535u ? 65535u : SMD_JERK_DATA[i]);
+        int8_t ch = smd_slot_phys_ch[slot];
+        if (ch < 0) continue;  /* 该槽位未接线，寄存器保持原值，不驱动硬件 */
+
+        _mbs->regHoldingBuf[SMD_SLOT_AM_ADDR(slot)]  = SMD_AM_READ(ch);
+        _mbs->regHoldingBuf[SMD_SLOT_DR_ADDR(slot)]  = SMD_DR_READ(ch);
+        _mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)] = SMD_ACC_DATA[ch];
+        _mbs->regHoldingBuf[SMD_SLOT_JRK_ADDR(slot)] = (uint16_t)(SMD_JERK_DATA[ch] > 65535u ? 65535u : SMD_JERK_DATA[ch]);
         /* STEP：步数控制触发寄存器（只写，回读始终为 0） */
-        _mbs->regHoldingBuf[SMD_1_STEP_ADDR + i * 10] = 0;
-        _mbs->regHoldingBuf[SMD_1_PU_ADDR  + i * 10] = SMD_PU_DATA[i];
+        _mbs->regHoldingBuf[SMD_SLOT_STEP_ADDR(slot)] = 0;
+        _mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)]  = SMD_PU_DATA[ch];
         /* SP：实时速度，主机可读取当前运行频率 */
-        _mbs->regHoldingBuf[SMD_1_SP_ADDR  + i * 10] = (uint16_t)smd_freq_gradient[i].current_freq_int;
+        _mbs->regHoldingBuf[SMD_SLOT_SP_ADDR(slot)]  = (uint16_t)smd_freq_gradient[ch].current_freq_int;
     }
 
     for (int i = 0; i < 20; i++)
@@ -121,6 +158,8 @@ void mbs_hook_updata_holding(mbs *_mbs)
   *  STEP ：写入目标步数，进入步数控制模式（须在 PU 之前写入）
   *  PU   ：非步数模式→启动S曲线；步数模式→更新最大脉冲频率
   *  SP   ：写 0=急停；写 N>1=直接跳变到 N Hz
+  *  OUT13/14、OUT15/16：兼容旧板继电器协议，分别解码为 M1/M2 目标速度
+  *                       （详见 mb_hook_decode_relay_pair()）
   */
 void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
 {
@@ -131,84 +170,87 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
 
     _mbs->regHoldingBuf[_reg] = _val;
 
-    for (int i = 0; i < SMD_CH_MAX; i++)
+    for (int slot = 0; slot < SMD_SLOT_COUNT; slot++)
     {
+        int8_t ch = smd_slot_phys_ch[slot];
+        if (ch < 0) continue;  /* 该槽位未接线，跳过，不驱动任何硬件 */
+
         /* --- 方向控制（步数模式下忽略，方向由步数差自动决定） --- */
-        if (!g_motorStepsCtl[i].is_running)
+        if (!g_motorStepsCtl[ch].is_running)
         {
-            if (_mbs->regHoldingBuf[SMD_1_DR_ADDR + i * 10] != SMD_DR_READ(i))
+            if (_mbs->regHoldingBuf[SMD_SLOT_DR_ADDR(slot)] != SMD_DR_READ(ch))
             {
-                smd_freq_gradient[i].dir_change = 1;
-                smd_freq_gradient[i].dir_state  = SMD_DIR_NORMAL;
+                smd_freq_gradient[ch].dir_change = 1;
+                smd_freq_gradient[ch].dir_state  = SMD_DIR_NORMAL;
             }
         }
 
         /* --- JRK写入：所有模式下均可更新 --- */
-        if (_mbs->regHoldingBuf[SMD_1_JRK_ADDR + i * 10] != SMD_JERK_DATA[i])
+        if (_mbs->regHoldingBuf[SMD_SLOT_JRK_ADDR(slot)] != SMD_JERK_DATA[ch])
         {
-            uint32_t jrk_val = (uint32_t)_mbs->regHoldingBuf[SMD_1_JRK_ADDR + i * 10];
+            uint32_t jrk_val = (uint32_t)_mbs->regHoldingBuf[SMD_SLOT_JRK_ADDR(slot)];
             if (jrk_val == 0)           jrk_val = SMD_JERK_DEFAULT;
             if (jrk_val < SMD_JERK_MIN) jrk_val = SMD_JERK_MIN;
             if (jrk_val > SMD_JERK_MAX) jrk_val = SMD_JERK_MAX;
-            SMD_JERK_DATA[i] = jrk_val;
-            _mbs->regHoldingBuf[SMD_1_JRK_ADDR + i * 10] = (uint16_t)(jrk_val > 65535u ? 65535u : jrk_val);
+            SMD_JERK_DATA[ch] = jrk_val;
+            _mbs->regHoldingBuf[SMD_SLOT_JRK_ADDR(slot)] = (uint16_t)(jrk_val > 65535u ? 65535u : jrk_val);
         }
 
         /* --- ACC_MAX写入：所有模式下均可更新 --- */
-        if (_mbs->regHoldingBuf[SMD_1_ACC_ADDR + i * 10] != SMD_ACC_DATA[i])
+        if (_mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)] != SMD_ACC_DATA[ch])
         {
-            uint16_t acc_val = _mbs->regHoldingBuf[SMD_1_ACC_ADDR + i * 10];
+            uint16_t acc_val = _mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)];
             if (acc_val < SMD_ACC_MAX_MIN) acc_val = SMD_ACC_MAX_MIN;
             if (acc_val > SMD_ACC_MAX_MAX) acc_val = (uint16_t)SMD_ACC_MAX_MAX;
-            SMD_ACC_DATA[i] = acc_val;
-            _mbs->regHoldingBuf[SMD_1_ACC_ADDR + i * 10] = acc_val;
+            SMD_ACC_DATA[ch] = acc_val;
+            _mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)] = acc_val;
         }
 
         /* --- STEP写入：进入步数控制模式 ---
          * 在 PU 之前处理：多寄存器连续写入时先触发步数模式，
          * 后续 PU 写入自动走"仅更新最大频率"分支。 */
-        if (_reg == (SMD_1_STEP_ADDR + i * 10))
+        if (_reg == SMD_SLOT_STEP_ADDR(slot))
         {
-            uint16_t target_steps = _mbs->regHoldingBuf[SMD_1_STEP_ADDR + i * 10];
-            g_motorStepsCtl[i].targetSteps = target_steps;
-            g_motorStepsCtl[i].is_running  = 1;
-            g_motorStepsCtl[i].braking     = 0;
+            uint16_t target_steps = _mbs->regHoldingBuf[SMD_SLOT_STEP_ADDR(slot)];
+            g_motorStepsCtl[ch].targetSteps = target_steps;
+            g_motorStepsCtl[ch].is_running  = 1;
+            g_motorStepsCtl[ch].braking     = 0;
         }
 
         /* --- PU写入：步数模式仅更新最大频率，非步数模式启动S曲线 --- */
-        if (_mbs->regHoldingBuf[SMD_1_PU_ADDR + i * 10] != SMD_PU_DATA[i])
+        if (_mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] != SMD_PU_DATA[ch])
         {
-            uint16_t pu_freq = _mbs->regHoldingBuf[SMD_1_PU_ADDR + i * 10];
+            uint16_t pu_freq = _mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)];
             if (pu_freq < SMD_PWM_FREQ_MIN) pu_freq = SMD_PWM_FREQ_MIN;
             if (pu_freq > SMD_PWM_FREQ_MAX) pu_freq = (uint16_t)SMD_PWM_FREQ_MAX;
-            SMD_PU_DATA[i] = pu_freq;
-            _mbs->regHoldingBuf[SMD_1_PU_ADDR + i * 10] = pu_freq;
+            SMD_PU_DATA[ch] = pu_freq;
+            _mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = pu_freq;
 
-            if (!g_motorStepsCtl[i].is_running)
+            if (!g_motorStepsCtl[ch].is_running)
             {
                 /* 非步数模式：启动S曲线渐变 */
-                SMD_PWM_SetFreqGradient((SMD_Channel)i, SMD_PU_DATA[i], SMD_ACC_DATA[i]);
+                SMD_PWM_SetFreqGradient((SMD_Channel)ch, SMD_PU_DATA[ch], SMD_ACC_DATA[ch]);
             }
-            /* 步数模式：仅更新 SMD_PU_DATA[i]，SMD_MotorStepsCtl 在下个中断取用 */
+            /* 步数模式：仅更新 SMD_PU_DATA[ch]，SMD_MotorStepsCtl 在下个中断取用 */
         }
 
         /* --- SP写入：直接跳变 / 急停 --- */
-        if (_reg == (SMD_1_SP_ADDR + i * 10))
+        if (_reg == SMD_SLOT_SP_ADDR(slot))
         {
-            uint16_t sp_cmd = _mbs->regHoldingBuf[SMD_1_SP_ADDR + i * 10];
+            uint16_t sp_cmd = _mbs->regHoldingBuf[SMD_SLOT_SP_ADDR(slot)];
 
             if (sp_cmd == 0)
             {
                 /* 急停：硬件停止，清除运动状态 */
-                SMD_PWM_Stop((SMD_Channel)i);
-                SMD_PU_DATA[i] = SMD_PWM_FREQ_MIN;
-                smd_freq_gradient[i].v_c              = 0.0f;
-                smd_freq_gradient[i].v_n              = 0.0f;
-                smd_freq_gradient[i].a_c              = 0.0f;
-                smd_freq_gradient[i].current_freq_int = SMD_PWM_FREQ_MIN;
-                smd_freq_gradient[i].is_running       = 0;
-                g_motorStepsCtl[i].is_running         = 0;
-                g_motorStepsCtl[i].braking            = 0;
+                SMD_PWM_Stop((SMD_Channel)ch);
+                SMD_PU_DATA[ch] = SMD_PWM_FREQ_MIN;
+                smd_freq_gradient[ch].v_c              = 0.0f;
+                smd_freq_gradient[ch].v_n              = 0.0f;
+                smd_freq_gradient[ch].a_c              = 0.0f;
+                smd_freq_gradient[ch].current_freq_int = SMD_PWM_FREQ_MIN;
+                smd_freq_gradient[ch].is_running       = 0;
+                g_motorStepsCtl[ch].is_running         = 0;
+                g_motorStepsCtl[ch].braking            = 0;
             }
             else if (sp_cmd > 1)
             {
@@ -216,29 +258,29 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
                 uint16_t target = sp_cmd;
                 if (target < (uint16_t)SMD_PWM_FREQ_MIN) target = (uint16_t)SMD_PWM_FREQ_MIN;
                 if (target > (uint16_t)SMD_PWM_FREQ_MAX) target = (uint16_t)SMD_PWM_FREQ_MAX;
-                SMD_PWM_SetFreq((SMD_Channel)i, target);
-                smd_freq_gradient[i].v_c  = (float)target;
-                smd_freq_gradient[i].v_n  = (float)target;
-                smd_freq_gradient[i].a_c  = 0.0f;
-                smd_freq_gradient[i].is_running = 0;
-                SMD_PU_DATA[i] = target;
-                g_motorStepsCtl[i].is_running = 0;
-                g_motorStepsCtl[i].braking = 0;
+                SMD_PWM_SetFreq((SMD_Channel)ch, target);
+                smd_freq_gradient[ch].v_c  = (float)target;
+                smd_freq_gradient[ch].v_n  = (float)target;
+                smd_freq_gradient[ch].a_c  = 0.0f;
+                smd_freq_gradient[ch].is_running = 0;
+                SMD_PU_DATA[ch] = target;
+                g_motorStepsCtl[ch].is_running = 0;
+                g_motorStepsCtl[ch].braking = 0;
             }
         }
 
         /* --- 全部步进电机急停寄存器 --- */
         if (_reg == STOP_ALL_MOTOR_ADDR && _mbs->regHoldingBuf[STOP_ALL_MOTOR_ADDR] == 1)
         {
-            SMD_PWM_Stop((SMD_Channel)i);
-            SMD_PU_DATA[i] = SMD_PWM_FREQ_MIN;
-            smd_freq_gradient[i].v_c              = 0.0f;
-            smd_freq_gradient[i].v_n              = 0.0f;
-            smd_freq_gradient[i].a_c              = 0.0f;
-            smd_freq_gradient[i].current_freq_int = SMD_PWM_FREQ_MIN;
-            smd_freq_gradient[i].is_running       = 0;
-            g_motorStepsCtl[i].is_running         = 0;
-            g_motorStepsCtl[i].braking            = 0;
+            SMD_PWM_Stop((SMD_Channel)ch);
+            SMD_PU_DATA[ch] = SMD_PWM_FREQ_MIN;
+            smd_freq_gradient[ch].v_c              = 0.0f;
+            smd_freq_gradient[ch].v_n              = 0.0f;
+            smd_freq_gradient[ch].a_c              = 0.0f;
+            smd_freq_gradient[ch].current_freq_int = SMD_PWM_FREQ_MIN;
+            smd_freq_gradient[ch].is_running       = 0;
+            g_motorStepsCtl[ch].is_running         = 0;
+            g_motorStepsCtl[ch].braking            = 0;
         }
     }
 
@@ -259,6 +301,19 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
         case MOTOR_2_TARGET_SP_ADDR:
             API_MOTOR_SetSpeed(API_MOTOR_2, (int8_t)_val);
             break;
+
+        /* --- 兼容旧板"继电器控制直流电机"协议：OUT13/14控制M1，OUT15/16控制M2 --- */
+        case OUT_13_ADDR:
+        case OUT_14_ADDR:
+            API_MOTOR_SetSpeed(API_MOTOR_1, mb_hook_decode_relay_pair(
+                _mbs->regHoldingBuf[OUT_13_ADDR], _mbs->regHoldingBuf[OUT_14_ADDR]));
+            break;
+        case OUT_15_ADDR:
+        case OUT_16_ADDR:
+            API_MOTOR_SetSpeed(API_MOTOR_2, mb_hook_decode_relay_pair(
+                _mbs->regHoldingBuf[OUT_15_ADDR], _mbs->regHoldingBuf[OUT_16_ADDR]));
+            break;
+
         default: break;
     }
 }

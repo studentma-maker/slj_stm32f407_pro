@@ -17,7 +17,8 @@
 #define MBS_ERR_MAX_TIMES	3
 #define MBS_REC_TIMEOUT		100  /* 单位3.5T */
 
-#define REG_HOLDING_NREGS   150 /* 保持寄存器数量 */
+#define REG_HOLDING_NREGS   200 /* 保持寄存器数量，与上位机 reg_map.h 的 REG_HOLDING_NREGS 一致，
+                                    保证 STOP_ALL_MOTOR_ADDR(=199) 等高地址寄存器不越界 */
 #define REG_COILS_SIZE      16 /* 线圈数量 */
 
 /* 从机结构体定义 ----------------------------------------------------------*/

@@ -87,19 +87,65 @@ M1/M2 直流电机寄存器为新板独有功能，旧板无对应地址，暂�
 | 地址 | 说明 |
 |------|------|
 | 80~91 | 12 路继电器输出 OUT1~OUT12（与旧板 OUT1~OUT16 起始地址一致） |
-| 92~99 | 预留（旧板此区间为编码器清零/编码器值，新板未实现） |
+| 92~95 | 兼容旧板"继电器控制直流电机"协议（OUT13/14→M1，OUT15/16→M2），无实际GPIO，详见下方 |
+| 96~99 | 预留（旧板此区间为编码器清零，新板未实现） |
 | 100~103 | M1/M2 直流电机目标/当前速度（新板独有，旧板无对应地址） |
 | 104~111 | 预留 |
 | 112~131 | 20 路数字输入 IN1~IN20（与旧板地址一致） |
 | 132 | 夹爪电机当前步数（只读，与旧板地址一致） |
 | 133 | 系统上电回原点状态，只读，对应 `GrippertoOrigin_P` 枚举（与旧板地址一致） |
 | 134 | 进退电机当前步数（只读，与旧板地址一致） |
-| 149（= `REG_HOLDING_NREGS-1`） | 全部步进电机急停（写 1 触发） |
+| 199（= `REG_HOLDING_NREGS-1`） | 全部步进电机急停（写 1 触发） |
 
 保留旧项目的 `WRITE_HOLDING_V`（=2）批量写保护约定：上位机批量写寄存器时，
 某个寄存器写入值 2 表示"保持不变"，下位机跳过该寄存器，避免误改。
 
-### 3. `Middleware/api_motor_control.c` — M1/M2 直流电机（MOS 桥）
+**`REG_HOLDING_NREGS` 由 150 改为 200**：核对上位机 `slj_kickpi_qt_pro/common/
+reg_map.h` 发现其 `STOP_ALL_MOTOR_ADDR` 硬编码算的是 `200-1=199`，如果固件端
+保持 150，地址 199 会越界，"全部电机急停"这个安全功能在上位机现有代码下根本
+不会生效。改成 200 后两边完全对齐，多用的寄存器空间（200×2=400 字节/从机
+实例）在 F407 上可以忽略不计。
+
+### 3. 电机寄存器槽位 -> 板上物理通道映射（`SMD_SLOT_x_PHYS_CH`）
+
+上位机 `slj_kickpi_qt_pro` 的协议是按旧板 8 路电机设计的（`common/reg_map.h`
+里 `MOTOR_1~MOTOR_8`，寄存器地址 0~79，每路 10 个寄存器），但新板只有 6 路
+物理步进通道。为了不用改上位机代码，`Modbus_RTU/mb_hook.h` 新增了 8 组具名
+寄存器地址（`SMD_1~8_xxx_ADDR`，与上位机 reg_map.h 完全一致）和一套通用函数宏
+`SMD_SLOT_xxx_ADDR(slot)`，`mb_hook.c` 按"寄存器槽位"（0~7，对应电机1~8）
+遍历寄存器，而不是直接按物理通道遍历；每个槽位驱动哪一路物理通道，由
+`mb_hook.h` 里这 8 个宏统一决定：
+
+```c
+#define SMD_SLOT_1_PHYS_CH   0   /* 排发自身地址，上位机实际不发，不接线 */
+#define SMD_SLOT_2_PHYS_CH   2   /* 送发 Trans，直连2号 */
+#define SMD_SLOT_3_PHYS_CH   3   /* 进退 FBack，直连3号 */
+#define SMD_SLOT_4_PHYS_CH   4   /* 升降 UpDown，直连4号 */
+#define SMD_SLOT_5_PHYS_CH   5   /* 夹爪 GripperMove，直连5号 */
+#define SMD_SLOT_6_PHYS_CH   1   /* 上料 Feed：排发命令实际落在这里，转接到1号 */
+#define SMD_SLOT_7_PHYS_CH   0   /* 未使用，不接线 */
+#define SMD_SLOT_8_PHYS_CH   6   /* 送发辅助电机，转接到6号 */
+```
+
+数值 1~6 表示接到板上第几路物理通道（对应 `api_smd.h` 的 `SMD_CH0~SMD_CH5`），
+0 表示这个槽位没有实际接线，写入会被忽略、不驱动任何硬件。**改接线只需要改
+这 8 个数字，不用碰 `mb_hook.c` 里的任何逻辑**。
+
+这张表是核对上位机 `worker/mainworker.cpp` 源码后确定的，关键依据：
+
+- `onControlMotor()` 里有 `if (id == MOTOR_PaiFa) hwId = MOTOR_Feed;`——
+  排发电机的命令实际发到了"槽位6"（MOTOR_Feed）的寄存器地址，不是自己槽位1
+  的地址；槽位1这段地址上位机实际从不发送
+- `onControlFeedSpeed()` 里 `MOTOR_Trans`、`MOTOR_FBack`、`MOTOR_GripperMove`
+  都是用自己的槽位地址直接发送，没有被重映射
+- `onControlFeedSpeed()` 额外用 `MOTOR_8`（槽位8）控制"送发辅助电机"
+
+> ⚠️ **待硬件核实**：以上映射关系是根据 2026-09 时点的上位机源码 + 你确认的
+> 实际接线（送发→2号、进退→3号、升降→4号、夹爪→5号、排发→1号、送发辅助
+> →6号）推出来的。如果之后上位机协议或接线有变化，只需要改
+> `mb_hook.h` 里的 8 个 `SMD_SLOT_x_PHYS_CH` 宏。
+
+### 4. `Middleware/api_motor_control.c` — M1/M2 直流电机（MOS 桥）
 
 新板用 4 颗 IRF3205 MOSFET（经 EG2104S 半桥驱动 IC + TLP2362 光耦隔离）搭了两组
 独立全桥，分别驱动 M1、M2 两路直流电机（原理图 `SYS_MC` 页），取代了旧板用继电器
@@ -120,9 +166,17 @@ EG2104S 各自驱动一条半桥腿，引脚为高电平时对应桥臂上管导
 - 反转：两个引脚角色互换，`M1_PWM2` 给 PWM，`M1_PWM1` 恒为 0%
 - 停止：两个引脚占空比都是 0%，电机两端都被拉到 GND（动态刹车）
 
-这套驱动、平滑加减速（`API_MOTOR_UpdateSpeed()`，每 100ms 调用一次）、以及
-Modbus 寄存器接口（`MOTOR_1/2_TARGET_SP_ADDR` 读写、`MOTOR_1/2_CURRENT_SP_ADDR`
-只读，见上方寄存器表）在本次移植开始前就已经实现好了，不需要再改。
+这套驱动本身、以及 Modbus 寄存器接口（`MOTOR_1/2_TARGET_SP_ADDR` 读写、
+`MOTOR_1/2_CURRENT_SP_ADDR` 只读，见上方寄存器表）在本次移植开始前就已经
+实现好了，不需要再改。
+
+**平滑加减速调用周期修正**：`API_MOTOR_UpdateSpeed()` 每次调用把当前速度向
+目标速度靠近 `g_motor_step_percent`（默认 2）个百分点，函数自身的文档注释
+写的是"BSP 定时器 10ms 中执行"，但 `main.c` 里实际挂在了
+`BSP_TIMER_FLAG_100MS` 下（100ms 一次），导致 0→100% 全程要 5 秒，比设计
+意图慢了 10 倍。已改为跟 `mbh_send()` 共用 `BSP_TIMER_FLAG_10MS`（10ms 一次），
+配合默认 2% 步进，0→100% 加减速时间变为 0.5 秒。如需更快，可以调大
+`g_motor_step_percent`（如 5%→0.2 秒，10%→0.1 秒）。
 
 **本次新移植的是旧板 `SMD_CheckRelayMotorLimit()` 的限位/急停保护逻辑**，
 新增 `API_MOTOR_CheckLimit()`，每 1ms 在 `api_smd.c` 的 TIM10 中断里调用一次：
@@ -132,9 +186,21 @@ Modbus 寄存器接口（`MOTOR_1/2_TARGET_SP_ADDR` 读写、`MOTOR_1/2_CURRENT_
 - 用 M1 当前速度的正负号代替旧板"读继电器方向"来判断运行方向
 - 限位/急停 IN 序号沿用旧板编号：**IN8(索引7)/IN10(索引9)** 为正转方向限位，
   **IN9(索引8)** 为反转方向限位，**IN20(索引19)** 为全局急停，触发后立即调用
-  `API_MOTOR_Stop(API_MOTOR_1)` 停止该电机（待你核实新板实际接线）
+  `API_MOTOR_Stop(API_MOTOR_1)` 停止该电机（待你核实新板实际接线）；这是立即
+  停止（两路PWM占空比直接置0），不走平滑减速斜坡，跟旧板继电器断电的效果一致
 
-### 4. GPIO 配置修复
+**兼容旧板"继电器控制直流电机"协议**：旧板上位机是通过写继电器寄存器
+`OUT_13_ADDR(92)`/`OUT_14_ADDR(93)` 一组控制一台电机、`OUT_15_ADDR(94)`/
+`OUT_16_ADDR(95)` 一组控制另一台电机的通断来实现启停+换向的（13=1,14=0→
+正转；13=0,14=1→反转；都为0→停止）。新板没有对应的物理继电器，但为了让
+旧上位机代码不用改，在 `mbs_hook_extract_holding()` 里保留了这 4 个寄存器
+地址作为纯协议兼容层：写入后由 `mb_hook_decode_relay_pair()` 解码，
+分别转换成对 M1（13/14）、M2（15/16）的 `API_MOTOR_SetSpeed(..., 100/-100/0)`
+调用——效果等价于直接写 `MOTOR_1/2_TARGET_SP_ADDR`，同样会经过平滑加减速。
+上位机原有发 13/14/15/16 的代码完全不用改，新旧两套寄存器可以任选其一，
+互相兼容。
+
+### 5. GPIO 配置修复
 
 `Project.ioc` / `Core/Src/gpio.c` 中 `SMD_DR_2`（PE7，2 号步进电机方向脚）原被
 CubeMX 误配置为外部中断输入（`GPXTI7`），导致写方向寄存器对该通道不生效。
