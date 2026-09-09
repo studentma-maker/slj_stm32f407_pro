@@ -65,7 +65,7 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOF, SMD_DR_4_Pin|SMD_DR_3_Pin|SMD_EN_4_Pin|SMD_EN_3_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, SMD_DR_1_Pin|SMD_EN_2_Pin|SMD_EN_1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOE, SMD_DR_2_Pin|SMD_DR_1_Pin|SMD_EN_2_Pin|SMD_EN_1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, OUT12_Pin|OUT11_Pin|OUT10_Pin|OUT9_Pin
@@ -120,14 +120,8 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : SMD_DR_2_Pin */
-  GPIO_InitStruct.Pin = SMD_DR_2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(SMD_DR_2_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : SMD_DR_1_Pin SMD_EN_2_Pin SMD_EN_1_Pin */
-  GPIO_InitStruct.Pin = SMD_DR_1_Pin|SMD_EN_2_Pin|SMD_EN_1_Pin;
+  /*Configure GPIO pins : SMD_DR_2_Pin SMD_DR_1_Pin SMD_EN_2_Pin SMD_EN_1_Pin */
+  GPIO_InitStruct.Pin = SMD_DR_2_Pin|SMD_DR_1_Pin|SMD_EN_2_Pin|SMD_EN_1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

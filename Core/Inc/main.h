@@ -312,6 +312,23 @@ void Error_Handler(void);
     ) == GPIO_PIN_SET ? 1 : 0) : 0 \
 )
 
+/* ==================== 继电器输出别名（OUT索引，0~11） ====================
+ * 移植自旧项目 slj_stm32f407（同一台机械结构，仅下位机板卡不同）。
+ * 旧项目源码（Core/Src/smd.c）中直接使用了这些别名，但源码本身缺失其宏定义，
+ * 以下取值依据旧项目 README.md 的"继电器映射"章节还原，需与实际继电器接线核对：
+ *   RELAY_1(OUT1)=备用/联锁；RELAY_FeedHair(OUT2)=送发气缸；
+ *   RELAY_PressHair(OUT3)=压发气缸；RELAY_WarnYELLOW(OUT8)=黄色警示灯 */
+#define RELAY_1             0
+#define RELAY_FeedHair      1
+#define RELAY_PressHair     2
+#define RELAY_WarnYELLOW    7
+
+/* 继电器/指示灯电平语义（0=低电平/1=高电平） */
+#define WarnLED_on              1
+#define WarnLED_off             0
+#define RELAY_FeedHair_up       1   // 送发气缸：0=下降/1=上升
+#define RELAY_PressHair_up      1   // 压发气缸：0=下降/1=上升
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
