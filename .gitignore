@@ -1,0 +1,39 @@
+# ==== Keil MDK-ARM (uVision / ARMCC / ARMCLANG) build intermediates ====
+# Objects, dependency files, cross-reference files, listings, link maps,
+# final images and reports produced by compiling in Keil. None of these
+# are needed to open/build the project in Keil on another machine.
+*.o
+*.d
+*.crf
+*.lst
+*.axf
+*.hex
+*.bin
+*.lnp
+*.map
+*.dep
+*.htm
+*.iex
+JLinkLog.txt
+JLinkSettings.ini
+EWARM.log
+
+# Default Keil output folder names (kept in case the project is
+# reconfigured to use them instead of a folder named after the project).
+Objects/
+Listings/
+
+# uVision per-user / per-machine GUI & workspace state (window layout,
+# open files, breakpoints view, last debug session) — not needed to build.
+*.uvguix.*
+
+# Backup files uVision sometimes leaves behind.
+*.bak
+*.~*
+
+# STM32CubeMX backup
+*.ioc.bak
+
+# OS junk
+Thumbs.db
+.DS_Store
