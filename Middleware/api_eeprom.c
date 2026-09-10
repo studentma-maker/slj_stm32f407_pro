@@ -247,6 +247,25 @@ void EEPROM_Init(void)
     EEPROM_ReadData(AT24Cxx_MCU_SLAVE_ADDR, (uint8_t *)&mbhMCU.slaveAddr, 1);
     EEPROM_ReadData(AT24Cxx_MCU_BAUD_ADDR, (uint8_t *)&mbhMCU.baudRate, 4);
     EEPROM_ReadData(AT24CXX_MCU_PARITY_ADDR, (uint8_t *)&mbhMCU.parity, 1);
+
+    /* 兜底：I2C 读失败（ucEEPROMFaultFlag==FAIL）或读回明显非法值（从机地址为0/
+       波特率为0，例如全新未初始化的EEPROM或I2C总线故障导致读取直接返回上电
+       残留值）时，退回编译期默认参数，避免下位机在通信参数非法的情况下完全
+       哑掉且无任何现象可查（原逻辑仅在dateInfo不匹配时才写默认值，读失败时
+       不会有任何提示） */
+    if (ucEEPROMFaultFlag == AT24Cxx_FAIL || mbsUSB.slaveAddr == 0 || mbsUSB.baudRate == 0)
+    {
+        mbsUSB.slaveAddr = RS485_SLAVE_ADDR;
+        mbsUSB.baudRate  = RS485_BAUD_RATE;
+        mbsUSB.parity    = RS485_PARITY;
+    }
+
+    if (ucEEPROMFaultFlag == AT24Cxx_FAIL || mbhMCU.slaveAddr == 0 || mbhMCU.baudRate == 0)
+    {
+        mbhMCU.slaveAddr = RS485_SLAVE_ADDR;
+        mbhMCU.baudRate  = RS485_BAUD_RATE;
+        mbhMCU.parity    = RS485_PARITY;
+    }
 }
 
 /*----------------------------- End of file -------------------------------*/

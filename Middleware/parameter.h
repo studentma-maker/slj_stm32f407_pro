@@ -19,11 +19,11 @@ extern "C" {
 
 /* 日期信息标识 每次修改参数都需要修改日期信息
    否则修改的信息无法写入到存储器中*/
-#define DATE_INFO            0x20260822
+#define DATE_INFO            0x20260910
 
 /* 默认通信参数 */
 #define RS485_SLAVE_ADDR     1
-#define RS485_BAUD_RATE      19200
+#define RS485_BAUD_RATE      115200
 #define RS485_PARITY         MB_PARITY_NONE
 
 #ifdef __cplusplus
