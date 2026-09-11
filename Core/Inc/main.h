@@ -224,31 +224,27 @@ enum Incom_ID {
     Incom_ID_MAX
 };
 
-// 注意：IN1_Pin/IN1_GPIO_Port 等宏本身必须保持 CubeMX 原始生成值不要改，
-// 因为 gpio.c 里的 MX_GPIO_Init() 是按“实际物理端口”把这些宏硬编码分组后
-// 传给 HAL_GPIO_Init(GPIOx, ...) 的（例如 IN2/IN4/IN6/IN8 一组传给 GPIOF，
-// IN1/IN3/IN5/IN7/IN9/IN11 一组传给 GPIOD）。如果直接跨端口互换某个 IN 宏的
-// Pin/Port 取值，会导致该组在错误的端口上初始化了错误的引脚号，真正接线所在
-// 的引脚反而没有被配置成上拉输入，读回恒为 0（此前 1~14 号失效正是这个原因）。
-// 丝印编号与寄存器编号不一致，只是"宏名字与实际物理走线"对应错了，因此只需
-// 调整下面这两张查表数组里的"顺序"（把成对的两个位置互换），不要动上面的
-// Pin/Port 宏定义本身，也不需要改 gpio.c。
+// IN1~IN20 端口/引脚映射表：与 CubeMX 生成的 IN1_Pin/IN1_GPIO_Port 等宏一一对应，
+// 不做顺序调整。丝印编号 N 对应寄存器索引 N-1（即 IN_READ(N-1)），若丝印与实际
+// 接线不一致，请在硬件上重新标注丝印，不要在此处调整数组顺序（gpio.c 的
+// MX_GPIO_Init() 是按这些宏的原始 Pin/Port 取值硬编码初始化的，调整顺序或互换
+// 宏取值都可能导致某些引脚脱离原有初始化分组，读回恒为 0）。
 #define IN_READ(index) ( \
     (index <= 19) ? \
     (HAL_GPIO_ReadPin( \
-        /* IN1~IN20 端口映射表：按丝印编号与实际接线核对后，将成对的两个位置互换 */ \
+        /* IN1~IN20 端口映射表 */ \
         ((GPIO_TypeDef*[]) { \
-            IN2_GPIO_Port, IN1_GPIO_Port, IN4_GPIO_Port, IN3_GPIO_Port, IN6_GPIO_Port, \
-            IN5_GPIO_Port, IN8_GPIO_Port, IN7_GPIO_Port, IN10_GPIO_Port, IN9_GPIO_Port, \
-            IN12_GPIO_Port, IN11_GPIO_Port, IN14_GPIO_Port, IN13_GPIO_Port, IN16_GPIO_Port, \
-            IN15_GPIO_Port, IN18_GPIO_Port, IN17_GPIO_Port, IN20_GPIO_Port, IN19_GPIO_Port \
+            IN1_GPIO_Port, IN2_GPIO_Port, IN3_GPIO_Port, IN4_GPIO_Port, IN5_GPIO_Port, \
+            IN6_GPIO_Port, IN7_GPIO_Port, IN8_GPIO_Port, IN9_GPIO_Port, IN10_GPIO_Port, \
+            IN11_GPIO_Port, IN12_GPIO_Port, IN13_GPIO_Port, IN14_GPIO_Port, IN15_GPIO_Port, \
+            IN16_GPIO_Port, IN17_GPIO_Port, IN18_GPIO_Port, IN19_GPIO_Port, IN20_GPIO_Port \
         })[index], \
-        /* IN1~IN20 引脚映射表：与上面端口表一一对应，同样成对互换 */ \
+        /* IN1~IN20 引脚映射表 */ \
         ((uint16_t[]) { \
-            IN2_Pin, IN1_Pin, IN4_Pin, IN3_Pin, IN6_Pin, \
-            IN5_Pin, IN8_Pin, IN7_Pin, IN10_Pin, IN9_Pin, \
-            IN12_Pin, IN11_Pin, IN14_Pin, IN13_Pin, IN16_Pin, \
-            IN15_Pin, IN18_Pin, IN17_Pin, IN20_Pin, IN19_Pin \
+            IN1_Pin, IN2_Pin, IN3_Pin, IN4_Pin, IN5_Pin, \
+            IN6_Pin, IN7_Pin, IN8_Pin, IN9_Pin, IN10_Pin, \
+            IN11_Pin, IN12_Pin, IN13_Pin, IN14_Pin, IN15_Pin, \
+            IN16_Pin, IN17_Pin, IN18_Pin, IN19_Pin, IN20_Pin \
         })[index] \
     ) == GPIO_PIN_SET ? 1 : 0) : 0 \
 )
