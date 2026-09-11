@@ -375,6 +375,10 @@ enum Incom_ID {
 #define RELAY_FeedHair      1
 #define RELAY_PressHair     2
 #define RELAY_WarnYELLOW    7
+/* 料车升降继电器（M1/M2 PWM+MOS桥暂未驱动成功，退回旧板的继电器正反转方案）：
+ * OUT11=1→上升，OUT12=1→下降，对应 Modbus OUT_11_ADDR/OUT_12_ADDR */
+#define RELAY_CartUp        10
+#define RELAY_CartDown      11
 
 /* 继电器/指示灯电平语义（0=低电平/1=高电平） */
 #define WarnLED_on              1
