@@ -176,22 +176,79 @@ void Error_Handler(void);
 
 // ��ͨ�����ȡ��IN_READ(����) �� ���� 0���ͣ�/1���ߣ�
 // ������0~19 �� ��ӦIN1~IN20��0��ʼ��
+// Incom_ID：与上位机 slj_kickpi_qt_pro（common/reg_map.h）逐位同步的输入别名，
+// 取值即为 IN_READ() 的索引（0~19），供本文件下方限位/急停判断代码按名字调用，
+// 不再直接写 IN_READ(数字)。别名依据现有限位/联锁代码逻辑，并与上位机
+// AutoFeedWorker/SewingWorker/WarnWorker 的实际用法交叉核对得出。
+// 后续如物理接线调换，只需把对应别名改指到新的 Incom_N 即可。
+enum Incom_ID {
+    Incom_1 = 0,
+    Incom_LiftLimit = Incom_1,           // 升降电机(MOTOR_UpDown)上限位/原点限位——该电机槽位在上位机已改用于舵机测试，未接入自动流程，此限位含义存疑，需现场核对接线
+    Incom_2 ,
+    Incom_FBackRetreatLimit = Incom_2,   // 进退电机回退(维护位)限位，cur_dir=0 方向触发
+    Incom_3 ,
+    Incom_FBackWorkLimit = Incom_3,      // 进退电机前进(工作位)限位，cur_dir=1 方向触发；上位机以此判定"维护状态"
+    Incom_4 ,
+    Incom_FeedHair = Incom_4,            // 送料气缸(RELAY_FeedHair)位置确认，兼作夹爪移动电机的联锁输入
+    Incom_5 ,
+    Incom_PressHair = Incom_5,           // 压料气缸(RELAY_PressHair)位置确认
+    Incom_6 ,
+    Incom_GripperHomeLimit = Incom_6,    // 夹爪移动电机原点/退回限位，触发时步数清零
+    Incom_7 ,
+    Incom_GripperGripLimit = Incom_7,    // 夹爪移动电机抓取位/前进限位
+    Incom_8 ,
+    Incom_CartGripLimit = Incom_8,       // 料车升降推杆：夹取位限位
+    Incom_9 ,
+    Incom_CartLowerLimit = Incom_9,      // 料车升降推杆：下限位
+    Incom_10 ,
+    Incom_CartUpperLimit = Incom_10,     // 料车升降推杆：上限位/无料
+    Incom_11 ,
+    Incom_CartPresent = Incom_11,        // 料车到位/固定检测（本体传感器，非推杆限位，本文件未使用）
+    Incom_12 ,
+    Incom_LineBroken1 = Incom_12,        // 断线检测 1（本文件未使用，仅上位机读取）
+    Incom_13 ,
+    Incom_LineBroken2 = Incom_13,
+    Incom_14 ,
+    Incom_LineBroken3 = Incom_14,
+    Incom_15 ,
+    Incom_LineBroken4 = Incom_15,
+    Incom_16 ,
+    Incom_Ch3 = Incom_16,                // 缝纫：物料尾部检测（本文件未使用，仅上位机读取）
+    Incom_17 ,
+    Incom_Ch1 = Incom_17,
+    Incom_18 ,
+    Incom_Ch2 = Incom_18,
+    Incom_19 ,                           // 备用，上下位机均未使用
+    Incom_20 ,
+    Incom_Estop = Incom_20,              // 急停开关，作用于全部电机通道
+    Incom_ID_MAX
+};
+
+// 注意：IN1_Pin/IN1_GPIO_Port 等宏本身必须保持 CubeMX 原始生成值不要改，
+// 因为 gpio.c 里的 MX_GPIO_Init() 是按“实际物理端口”把这些宏硬编码分组后
+// 传给 HAL_GPIO_Init(GPIOx, ...) 的（例如 IN2/IN4/IN6/IN8 一组传给 GPIOF，
+// IN1/IN3/IN5/IN7/IN9/IN11 一组传给 GPIOD）。如果直接跨端口互换某个 IN 宏的
+// Pin/Port 取值，会导致该组在错误的端口上初始化了错误的引脚号，真正接线所在
+// 的引脚反而没有被配置成上拉输入，读回恒为 0（此前 1~14 号失效正是这个原因）。
+// 丝印编号与寄存器编号不一致，只是"宏名字与实际物理走线"对应错了，因此只需
+// 调整下面这两张查表数组里的"顺序"（把成对的两个位置互换），不要动上面的
+// Pin/Port 宏定义本身，也不需要改 gpio.c。
 #define IN_READ(index) ( \
     (index <= 19) ? \
     (HAL_GPIO_ReadPin( \
-        /* IN1~IN20 �˿�ӳ��� */ \
+        /* IN1~IN20 端口映射表：按丝印编号与实际接线核对后，将成对的两个位置互换 */ \
         ((GPIO_TypeDef*[]) { \
-            IN1_GPIO_Port, IN2_GPIO_Port, IN3_GPIO_Port, IN4_GPIO_Port, IN5_GPIO_Port, \
-            IN6_GPIO_Port, IN7_GPIO_Port, IN8_GPIO_Port, IN9_GPIO_Port, IN10_GPIO_Port, \
-            IN11_GPIO_Port, IN12_GPIO_Port, IN13_GPIO_Port, IN14_GPIO_Port, IN15_GPIO_Port, \
-            IN16_GPIO_Port, IN17_GPIO_Port, IN18_GPIO_Port, IN19_GPIO_Port, IN20_GPIO_Port \
+            IN2_GPIO_Port, IN1_GPIO_Port, IN4_GPIO_Port, IN3_GPIO_Port, IN6_GPIO_Port, \
+            IN5_GPIO_Port, IN8_GPIO_Port, IN7_GPIO_Port, IN10_GPIO_Port, IN9_GPIO_Port, \
+            IN12_GPIO_Port, IN11_GPIO_Port, IN14_GPIO_Port, IN13_GPIO_Port, IN16_GPIO_Port, \
+            IN15_GPIO_Port, IN18_GPIO_Port, IN17_GPIO_Port, IN20_GPIO_Port, IN19_GPIO_Port \
         })[index], \
-        /* IN1~IN20 ����ӳ��� */ \
+        /* IN1~IN20 引脚映射表：与上面端口表一一对应，同样成对互换 */ \
         ((uint16_t[]) { \
-            IN1_Pin, IN2_Pin, IN3_Pin, IN4_Pin, IN5_Pin, \
-            IN6_Pin, IN7_Pin, IN8_Pin, IN9_Pin, IN10_Pin, \
-            IN11_Pin, IN12_Pin, IN13_Pin, IN14_Pin, IN15_Pin, \
-            IN16_Pin, IN17_Pin, IN18_Pin, IN19_Pin, IN20_Pin \
+            IN2_Pin, IN1_Pin, IN4_Pin, IN3_Pin, IN6_Pin, \
+            IN5_Pin, IN8_Pin, IN7_Pin, IN10_Pin, IN9_Pin, \
+            IN12_Pin, IN11_Pin, IN14_Pin, IN13_Pin, IN16_Pin, \
+            IN15_Pin, IN18_Pin, IN17_Pin, IN20_Pin, IN19_Pin \
         })[index] \
     ) == GPIO_PIN_SET ? 1 : 0) : 0 \
 )

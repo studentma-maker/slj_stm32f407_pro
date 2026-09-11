@@ -198,8 +198,9 @@ void API_MOTOR_CheckLimit(void)
         if (speed == 0) continue;
 
         uint8_t cur_dir = (speed > 0) ? 1u : 0u;  // 1=正转，0=反转
-        uint8_t hit = (((!IN_READ(7) || !IN_READ(9)) && cur_dir) || (!IN_READ(8) && !cur_dir));
-        if (!IN_READ(19)) hit = 1;  // 急停按钮
+        uint8_t hit = (((!IN_READ(Incom_CartGripLimit) || !IN_READ(Incom_CartUpperLimit)) && cur_dir) ||
+                       (!IN_READ(Incom_CartLowerLimit) && !cur_dir));
+        if (!IN_READ(Incom_Estop)) hit = 1;  // 急停按钮
 
         if (hit)
         {

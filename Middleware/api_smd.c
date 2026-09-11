@@ -301,13 +301,13 @@ int32_t SMD_CalcAccNeedSteps(float v_current, float a_current,
 /* ========================= 内部：限位/急停检测 ========================= */
 /**
  * @brief  各通道限位开关检测，触发时立即急停该通道
- * @note   IN/OUT 序号与判定逻辑沿用旧项目 slj_stm32f407（同一台机械结构，
- *         仅下位机板卡不同），需与实际线束核对一致：
- *           升降电机(MOTOR_UpDown)：IN1(索引0) 上限位
- *           进退电机(MOTOR_FBack) ：IN2(索引1)/IN3(索引2) 双向限位
- *           夹爪电机(MOTOR_GripperMove)：IN6(索引5)/IN7(索引6) 双向限位，
- *             IN4(索引3) 联锁触发、RELAY_1 联锁触发
- *           急停：IN20(索引19)，作用于全部通道
+ * @note   判定逻辑沿用旧项目 slj_stm32f407（同一台机械结构，仅下位机板卡不同），
+ *         Incom_ID 别名定义见 main.h，需与实际线束核对一致：
+ *           升降电机(MOTOR_UpDown)：Incom_LiftLimit 上限位
+ *           进退电机(MOTOR_FBack) ：Incom_FBackRetreatLimit/Incom_FBackWorkLimit 双向限位
+ *           夹爪电机(MOTOR_GripperMove)：Incom_GripperHomeLimit/Incom_GripperGripLimit 双向限位，
+ *             Incom_FeedHair 联锁触发、RELAY_1 联锁触发
+ *           急停：Incom_Estop，作用于全部通道
  */
 static uint8_t SMD_IsLimited(int ch, uint8_t cur_dir, SMD_Freq_Gradient *m)
 {
@@ -315,21 +315,22 @@ static uint8_t SMD_IsLimited(int ch, uint8_t cur_dir, SMD_Freq_Gradient *m)
     switch (ch)
     {
         case MOTOR_UpDown:
-            hit = (!IN_READ(0) && !cur_dir);
+            hit = (!IN_READ(Incom_LiftLimit) && !cur_dir);
             break;
         case MOTOR_FBack:
-            hit = ((!IN_READ(1) && !cur_dir) || (!IN_READ(2) && cur_dir));
+            hit = ((!IN_READ(Incom_FBackRetreatLimit) && !cur_dir) ||
+                   (!IN_READ(Incom_FBackWorkLimit) && cur_dir));
             break;
         case MOTOR_GripperMove:
-            hit = ((!IN_READ(5) && !cur_dir) ||
-                   (!IN_READ(6) && cur_dir)  ||
-                   (IN_READ(3)) ||
+            hit = ((!IN_READ(Incom_GripperHomeLimit) && !cur_dir) ||
+                   (!IN_READ(Incom_GripperGripLimit) && cur_dir)  ||
+                   (IN_READ(Incom_FeedHair)) ||
                    (!OUT_READ(RELAY_1)));
             break;
         default:
             break;
     }
-    if (!IN_READ(19)) hit = 1;  // 急停按钮
+    if (!IN_READ(Incom_Estop)) hit = 1;  // 急停按钮
 
     if (hit)
     {
@@ -348,7 +349,7 @@ static uint8_t SMD_IsLimited(int ch, uint8_t cur_dir, SMD_Freq_Gradient *m)
             g_motorStepsCtl[ch].braking = 0;
         }
         /* 触发原点限位时步数清零 */
-        if (ch == MOTOR_GripperMove && !IN_READ(5))
+        if (ch == MOTOR_GripperMove && !IN_READ(Incom_GripperHomeLimit))
         {
             MotorCurStepsU[ch] = 0;
             MotorCurStepsSub[ch] = 0;
@@ -372,8 +373,8 @@ static void SMD_MotorStepsCtl(SMD_Channel ch)
     int32_t step_remain = (int32_t)g_motorStepsCtl[ch].targetSteps - (int32_t)MotorCurStepsU[ch];
 
     /* 限位直达模式：targetSteps==0 向原点限位，targetSteps==0xFFFF 向远端限位
-     * 升降电机  cur_dir=0 上升->上限位 IN_READ(0)，只有原点限位，不支持 0xFFFF
-     * 夹爪电机  cur_dir=0->IN_READ(5)  cur_dir=1->IN_READ(6)
+     * 升降电机  cur_dir=0 上升->上限位 Incom_LiftLimit，只有原点限位，不支持 0xFFFF
+     * 夹爪电机  cur_dir=0->Incom_GripperHomeLimit  cur_dir=1->Incom_GripperGripLimit
      * 进退电机  targetSteps==0 走正常步数控制回零，不走限位直达 */
     if ((g_motorStepsCtl[ch].targetSteps == 0 && ch != MOTOR_FBack) ||
         (g_motorStepsCtl[ch].targetSteps == 0xFFFFu && ch != MOTOR_UpDown))
@@ -518,7 +519,8 @@ static void SMD_SysToOrigin(void)
             return;
 
         case waitPressUP:
-            if ((!IN_READ(3) && !IN_READ(4) && IN_READ(19) /* 急停 */) || !IN_READ(5))
+            if ((!IN_READ(Incom_FeedHair) && !IN_READ(Incom_PressHair) && IN_READ(Incom_Estop) /* 急停 */)
+                || !IN_READ(Incom_GripperHomeLimit))
             {
                 g_sysToOrigin++;
             }
@@ -540,7 +542,7 @@ static void SMD_SysToOrigin(void)
             return;
 
         case waitToOrigin:
-            if (!IN_READ(5))
+            if (!IN_READ(Incom_GripperHomeLimit))
             {
                 MotorCurStepsU[MOTOR_GripperMove] = 0;
                 MotorCurStepsSub[MOTOR_GripperMove] = 0;
