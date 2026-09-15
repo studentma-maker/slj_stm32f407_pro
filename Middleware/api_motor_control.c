@@ -287,7 +287,7 @@ static void Motor_SetPWM(MOTOR_State_t *pState, int8_t speed)
     {
         pulse = (uint32_t)((uint32_t)speed * g_timer_period / 100);
         __HAL_TIM_SET_COMPARE(htim, pState->ch_op, pulse);
-        __HAL_TIM_SET_COMPARE(htim, pState->ch_on, 0);
+        __HAL_TIM_SET_COMPARE(htim, pState->ch_on, 1);
         HAL_TIM_PWM_Start(htim, pState->ch_op);
         HAL_TIM_PWM_Start(htim, pState->ch_on);
         pState->direction = 1;
@@ -295,7 +295,7 @@ static void Motor_SetPWM(MOTOR_State_t *pState, int8_t speed)
     else
     {
         pulse = (uint32_t)((uint32_t)(-speed) * g_timer_period / 100);
-        __HAL_TIM_SET_COMPARE(htim, pState->ch_op, 0);
+        __HAL_TIM_SET_COMPARE(htim, pState->ch_op, 1);
         __HAL_TIM_SET_COMPARE(htim, pState->ch_on, pulse);
         HAL_TIM_PWM_Start(htim, pState->ch_op);
         HAL_TIM_PWM_Start(htim, pState->ch_on);

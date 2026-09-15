@@ -9,12 +9,11 @@
   *              沿用原项目对应机械结构（进退/升降/夹爪）的判定逻辑，
   *              IN/OUT 序号沿用原项目编号，需与实际线束核对
   *            - 继电器电机（原 OUT12/13 通过继电器正反转驱动的推杆电机）：
-  *              新板本应改为 M1/M2 独立 PWM+MOS桥驱动，对应限位急停逻辑已移植到
-  *              api_motor_control.c 的 API_MOTOR_CheckLimit()；但目前 M1/M2 尚未
-  *              驱动成功，暂时退回旧板方案，改用 OUT11(上升)/OUT12(下降) 两路
-  *              继电器直接正反转驱动料车电机，对应限位保护见本文件的
-  *              SMD_CheckRelayMotorLimit()，与 API_MOTOR_CheckLimit() 一样在
-  *              TIM10 1ms中断里调用
+  *              硬件已改为 M1/M2 独立 PWM+MOS桥驱动并调通，限位急停逻辑见
+  *              api_motor_control.c 的 API_MOTOR_CheckLimit()，在 TIM10 1ms
+  *              中断里调用；旧板 OUT11(上升)/OUT12(下降) 继电器方案及对应的
+  *              SMD_CheckRelayMotorLimit() 限位保护已停用（保留代码以注释形式
+  *              存档，见本文件对应位置），不再驱动料车电机
   * @version V2.0.0
   * @date    09-Sep-2026
   */
@@ -96,7 +95,8 @@ static void SMD_MotorStepsCtl   (SMD_Channel ch);
 static void SMD_SysToOrigin     (void);
 static void SMD_ProcessChannel  (SMD_Channel ch);
 static void SMD_RunSCurve       (SMD_Channel ch, SMD_Freq_Gradient *m);
-static void SMD_CheckRelayMotorLimit(void);
+/* SMD_CheckRelayMotorLimit(void); -- 旧板OUT11/12继电器料车电机方案已停用，
+ * M1/M2 PWM方案已调通，见下方函数定义处的注释 */
 
 /* ========================= 内部：频率转PSC/ARR ========================= */
 /**
@@ -688,35 +688,29 @@ static void SMD_ProcessChannel(SMD_Channel ch)
     SMD_RunSCurve(ch, m);
 }
 
-/* ========================= 内部：料车继电器电机限位/急停 ========================= */
+/* ========================= 内部：料车继电器电机限位/急停（已停用） ========================= */
 /**
- * @brief  料车升降继电器电机限位/急停保护，需每 1ms 调用一次
- * @note   移植自旧板 slj_stm32f407 的 SMD_CheckRelayMotorLimit()：旧板用
- *         RELAY_MOTOR_1/RELAY_MOTOR_2 两路继电器正反转驱动同一台推杆电机；
- *         新板 M1/M2 PWM+MOS桥暂未驱动成功，退回旧板方案，改用 OUT11(上升)/
- *         OUT12(下降) 两路继电器直接驱动，判定条件与 API_MOTOR_CheckLimit()
- *         完全一致（同一台电机、同一组限位开关），只是运行方向从"电机当前
- *         速度符号"换成"哪一路继电器为高电平"：
- *           OUT11=1（上升）：Incom_CartGripLimit / Incom_CartUpperLimit 任一触发
- *           OUT12=1（下降）：Incom_CartLowerLimit 触发
- *           Incom_Estop：全局急停，作用于两个方向
- *         两路继电器都未输出时直接返回，避免误触发时反复写 OUT 寄存器。
+ * @brief  【已停用】料车升降继电器电机限位/急停保护，原每 1ms 调用一次
+ * @note   M1/M2 PWM+MOS桥硬件已调通，料车电机改为直接由 API_MOTOR_CheckLimit()
+ *         保护（速度符号代替本函数的"继电器电平"判方向），不再使用 OUT11(上升)/
+ *         OUT12(下降) 两路继电器驱动，本函数整体注释保留存档，不再编译进固件：
+ *
+ * static void SMD_CheckRelayMotorLimit(void)
+ * {
+ *     if (!OUT_READ(RELAY_CartUp) && !OUT_READ(RELAY_CartDown)) return;
+ *
+ *     uint8_t cur_dir = OUT_READ(RELAY_CartUp);  // OUT11=1→上升, OUT12=1→下降
+ *     uint8_t hit = (((!IN_READ(Incom_CartGripLimit) || !IN_READ(Incom_CartUpperLimit)) && cur_dir) ||
+ *                    (!IN_READ(Incom_CartLowerLimit) && !cur_dir));
+ *     if (!IN_READ(Incom_Estop)) hit = 1;  // 急停按钮
+ *
+ *     if (hit)
+ *     {
+ *         OUT(RELAY_CartUp, 0);
+ *         OUT(RELAY_CartDown, 0);
+ *     }
+ * }
  */
-static void SMD_CheckRelayMotorLimit(void)
-{
-    if (!OUT_READ(RELAY_CartUp) && !OUT_READ(RELAY_CartDown)) return;
-
-    uint8_t cur_dir = OUT_READ(RELAY_CartUp);  // OUT11=1→上升, OUT12=1→下降
-    uint8_t hit = (((!IN_READ(Incom_CartGripLimit) || !IN_READ(Incom_CartUpperLimit)) && cur_dir) ||
-                   (!IN_READ(Incom_CartLowerLimit) && !cur_dir));
-    if (!IN_READ(Incom_Estop)) hit = 1;  // 急停按钮
-
-    if (hit)
-    {
-        OUT(RELAY_CartUp, 0);
-        OUT(RELAY_CartDown, 0);
-    }
-}
 
 /* ========================= TIM10 1ms中断服务函数（S曲线调度） ========================= */
 /**
@@ -728,8 +722,7 @@ static void SMD_CheckRelayMotorLimit(void)
  *   2. 对支持步数控制的通道做步数控制决策 SMD_MotorStepsCtl()
  *   3. 推进"回原点"状态机 SMD_SysToOrigin()
  *   4. 推杆电机（M1/M2双路冗余）的限位/急停保护 API_MOTOR_CheckLimit()
- *   5. 料车继电器电机（OUT11/12，M1/M2 暂未驱动成功时的备用方案）的限位/
- *      急停保护 SMD_CheckRelayMotorLimit()
+ *   （OUT11/12继电器料车电机方案已停用，SMD_CheckRelayMotorLimit() 不再调用）
  */
 void TIM1_UP_TIM10_IRQHandler(void)
 {
@@ -746,7 +739,7 @@ void TIM1_UP_TIM10_IRQHandler(void)
 
     API_MOTOR_CheckLimit();
 
-    SMD_CheckRelayMotorLimit();
+    /* SMD_CheckRelayMotorLimit(); -- 已停用，见上方函数定义处注释 */
 }
 
 /*----------------------------- End of file -------------------------------*/
