@@ -19,11 +19,13 @@ typedef struct
     int8_t current_speed;       /* 当前实际速度 (-100 ~ 100) */
     int8_t target_speed;        /* 目标速度 (-100 ~ 100) */
     uint8_t direction;          /* 当前方向: 0=停止, 1=正转, 2=反转 */
+    uint8_t fast_stop;          /* 1=正在按急停/限位缓停步进降速到0 */
 } MOTOR_State_t;
 
 static TIM_HandleTypeDef *g_htim = NULL;       /*!< 定时器句柄指针 */
 static uint32_t g_timer_period = 0;            /*!< 定时器自动重载值（ARR） */
-uint8_t g_motor_step_percent = 2;              /*!< 加减速步进百分比 */
+uint8_t g_motor_step_percent = 2;              /*!< 加减速步进百分比（正常缓起/缓停） */
+uint8_t g_motor_estop_step_percent = 8;        /*!< 急停/限位缓停步进百分比，需大于 g_motor_step_percent */
 
 /* 通道映射表
  * M1: OP=CH3, ON=CH4
@@ -67,6 +69,7 @@ void API_MOTOR_Init(TIM_HandleTypeDef *htim, uint32_t frequency)
         g_motor_state[i].current_speed = 0;
         g_motor_state[i].target_speed = 0;
         g_motor_state[i].direction = 0;
+        g_motor_state[i].fast_stop = 0;
     }
 
     /* 初始状态：所有通道输出 0（低电平），防止上电误动作 */
@@ -128,6 +131,7 @@ void API_MOTOR_SetSpeed(API_MOTOR_Num_t motor, int8_t speed)
 
     g_motor_state[motor].target_speed = speed;
     g_motor_state[motor].direction = Motor_GetDirection(speed);
+    g_motor_state[motor].fast_stop = 0;   /* 手动下发的速度指令按正常步进执行 */
 }
 
 /**
@@ -156,10 +160,11 @@ void API_MOTOR_SetStepViaComm(uint8_t step)
 }
 
 /**
-  * @brief  立即停止电机（紧急刹车）
+  * @brief  立即停止电机（瞬间切断输出，无缓冲）
   * @param  motor   电机编号
   * @retval None
-  * @note   两路同时输出低电平，无加减速过程，用于紧急情况
+  * @note   两路同时输出低电平，无加减速过程；限位/急停保护已改为在
+  *         API_MOTOR_CheckLimit() 中走缓停逻辑，不再调用本函数
   */
 void API_MOTOR_Stop(API_MOTOR_Num_t motor)
 {
@@ -170,6 +175,7 @@ void API_MOTOR_Stop(API_MOTOR_Num_t motor)
     g_motor_state[motor].current_speed = 0;
     g_motor_state[motor].target_speed = 0;
     g_motor_state[motor].direction = 0;
+    g_motor_state[motor].fast_stop = 0;
 }
 
 /**
@@ -188,7 +194,10 @@ int8_t API_MOTOR_GetCurrentSpeed(API_MOTOR_Num_t motor)
   * @retval None
   * @note   M1/M2 是同一台电机的双路冗余接线（哪路 MOS 桥烧了就把电机接线
   *         换到另一路，程序不用改），所以两路受完全相同的限位/急停信号
-  *         保护，分别独立判断、独立停止，详见 api_motor_control.h 中的说明
+  *         保护，分别独立判断、独立停止，详见 api_motor_control.h 中的说明。
+  *         触发后不再瞬间切断输出，而是把目标速度置 0 并标记 fast_stop，
+  *         交由 API_MOTOR_UpdateSpeed() 以更大的 g_motor_estop_step_percent
+  *         步进快速缓停，比正常缓起更快但仍有斜坡缓冲。
   */
 void API_MOTOR_CheckLimit(void)
 {
@@ -204,7 +213,8 @@ void API_MOTOR_CheckLimit(void)
 
         if (hit)
         {
-            API_MOTOR_Stop(m);
+            g_motor_state[m].target_speed = 0;
+            g_motor_state[m].fast_stop = 1;
         }
     }
 }
@@ -222,7 +232,8 @@ uint8_t API_MOTOR_GetStepPercent(void)
   * @brief  BSP 定时器 10ms 中的速度更新函数
   * @retval None
   * @note   在 main.c 的 BSP 定时器回调中调用
-  *         平滑减速过零，无急刹车
+  *         平滑加减速过零，无急刹车；若电机处于 fast_stop（限位/急停触发的
+  *         缓停）状态，改用更大的 g_motor_estop_step_percent 步进快速降速
   */
 void API_MOTOR_UpdateSpeed(void)
 {
@@ -230,6 +241,7 @@ void API_MOTOR_UpdateSpeed(void)
     MOTOR_State_t *pState;
     int8_t current, target;
     int8_t next;
+    uint8_t step;
 
     for (motor = API_MOTOR_1; motor <= API_MOTOR_2; motor++)
     {
@@ -239,23 +251,31 @@ void API_MOTOR_UpdateSpeed(void)
 
         /* 已到达目标，跳过 */
         if (current == target)
+        {
+            pState->fast_stop = 0;
             continue;
+        }
+
+        step = pState->fast_stop ? g_motor_estop_step_percent : g_motor_step_percent;
 
         /* 步进计算（自然过零，无需特殊分支） */
         if (target > current)
         {
-            next = current + g_motor_step_percent;
+            next = current + step;
             if (next > target) next = target;
         }
         else /* target < current */
         {
-            next = current - g_motor_step_percent;
+            next = current - step;
             if (next < target) next = target;
         }
 
         /* 输出到硬件（同时会调用 Start 重新使能 PWM） */
         Motor_SetPWM(pState, next);
         pState->current_speed = next;
+
+        if (next == target)
+            pState->fast_stop = 0;
     }
 }
 

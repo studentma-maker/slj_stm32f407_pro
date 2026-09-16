@@ -24,9 +24,17 @@ extern "C" {
 
 /**
   * @brief 加减速步进配置
-  * @note  每次调整的百分比步长（值越小加减速越平滑）
+  * @note  每次调整的百分比步长（值越小加减速越平滑），用于正常缓起/缓停
   */
 extern uint8_t g_motor_step_percent;
+
+/**
+  * @brief 急停/限位缓停专用步进配置
+  * @note  触发限位或急停时，电机不再瞬间切断输出，而是以该步长快速斜坡
+  *        降速到 0；数值需大于 g_motor_step_percent，以保证缓停明显快于
+  *        缓起，同时避免完全失去缓冲、瞬间冲击机构
+  */
+extern uint8_t g_motor_estop_step_percent;
 
 
 /* 导出类型定义 ------------------------------------------------------------*/
@@ -84,10 +92,12 @@ void API_MOTOR_SetSpeedViaComm(API_MOTOR_Num_t motor, int8_t speed);
 void API_MOTOR_SetStepViaComm(uint8_t step);
 
 /**
-  * @brief  立即停止电机（紧急刹车）
+  * @brief  立即停止电机（瞬间切断输出，无缓冲）
   * @param  motor   电机编号
   * @retval None
-  * @note   两路同时输出低电平，无加减速过程，用于紧急情况
+  * @note   两路同时输出低电平，无加减速过程；当前仅作为通用即停接口保留，
+  *         限位/急停保护已改为调用 API_MOTOR_CheckLimit() 中的缓停逻辑，
+  *         不再直接调用本函数
   */
 void API_MOTOR_Stop(API_MOTOR_Num_t motor);
 
@@ -112,7 +122,9 @@ int8_t API_MOTOR_GetCurrentSpeed(API_MOTOR_Num_t motor);
   *           IN9(索引8)：反转方向限位
   *           IN20(索引19)：全局急停
   *         IN 序号沿用旧板编号，需与实际接线核实。每路电机仅在正在运行
-  *         （速度非0）时才检测，触发后立即调用 API_MOTOR_Stop() 停止该路。
+  *         （速度非0）时才检测，触发后不再瞬间切断输出，而是将目标速度
+  *         置 0 并以 g_motor_estop_step_percent（快于正常缓起的步进）
+  *         驱动 API_MOTOR_UpdateSpeed() 快速缓停，减小对机构的冲击。
   */
 void API_MOTOR_CheckLimit(void);
 
