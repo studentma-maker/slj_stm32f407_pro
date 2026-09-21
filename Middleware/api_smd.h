@@ -180,6 +180,14 @@ HAL_StatusTypeDef SMD_PWM_Stop(SMD_Channel ch);
 HAL_StatusTypeDef SMD_PWM_SetFreq(SMD_Channel ch, uint32_t freq);
 
 /**
+  * @brief  读取指定通道"已输出脉冲总数"（自由运行的 32 位无符号计数，只增不清，不分方向）
+  * @note   一个脉冲 = 驱动器收到的一个 PU 脉冲（与上位机 feedMmPerStep 的"步"同义）。
+  *         回绕无妨：使用方应做无符号取模差分 (uint32_t)(now - prev)。
+  *         皮带（排发电机，MOTOR_PaiFa）的该值通过 Modbus 135/136 只读回读。
+  */
+uint32_t SMD_GetPulseTotal(SMD_Channel ch);
+
+/**
   * @brief  根据当前速度/加速度反推减速到目标速度所需的步数
   * @note   移植自旧项目 SMD_CalcAccNeedSteps()，用于步数控制的提前刹车决策
   */

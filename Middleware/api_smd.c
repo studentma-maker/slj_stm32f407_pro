@@ -66,6 +66,16 @@ uint16_t SMD_JERK_DATA[SMD_CH_MAX] = {
 uint16_t MotorCurStepsU[SMD_CH_MAX] = {0};
 static uint32_t MotorCurStepsSub[SMD_CH_MAX] = {0}; /* 子步累加器 (1步=1000子步)，消除浮点累积误差 */
 
+/* 各通道"已输出脉冲总数"（自由运行、只增不清、不分方向）。
+ * 与上面的 MotorCurStepsU 不同：MotorCurStepsU 是带方向、会被限位/回零清零的 uint16 位置量，
+ * 这里是给上位机做位移差分用的累计量（皮带位置），因此：
+ *   - 32 位：8kHz 满速连续运行约 149 小时才回绕；回绕无妨，上位机用无符号取模做差分
+ *   - 不清零：避免上位机清零命令与计数并发造成丢脉冲；上位机需要零点时在本地记 base
+ *   - 按 PWM 输出的真实状态计数（见 SMD_PulseCountTick），不依赖 S 曲线/直接跳变/步数模式等
+ *     具体是哪条路径改的频率 */
+static volatile uint32_t MotorPulseTotal[SMD_CH_MAX] = {0};
+static uint32_t MotorPulseSub[SMD_CH_MAX] = {0};    /* 微脉冲累加器 (1脉冲=1000000微脉冲) */
+
 SMD_StepsCtl_t g_motorStepsCtl[SMD_CH_MAX] = {
     {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},
 };
@@ -134,6 +144,62 @@ static void SMD_AccumulateSteps(SMD_Channel ch, uint32_t freq_int)
             else MotorCurStepsU[ch] -= whole;
         }
     }
+}
+
+/* ========================= 内部：脉冲总数计数（每1ms调用一次） ========================= */
+/**
+ * @brief  判断通道 PWM 输出当前是否使能（CCxE / 互补通道 CCxNE）
+ * @note   SMD_PWM_Stop() 会关闭对应位，因此"停止"期间不计数
+ */
+static uint8_t SMD_PWM_IsOutputOn(SMD_Channel ch)
+{
+    const SMD_TimerMap *t = &smd_timer_map[ch];
+    const uint32_t mask = t->is_complementary ? (TIM_CCER_CC1NE << t->tim_channel)
+                                              : (TIM_CCER_CC1E  << t->tim_channel);
+    return (t->handle->Instance->CCER & mask) ? 1u : 0u;
+}
+
+/**
+ * @brief  按各通道 PWM 的真实输出频率累加脉冲总数
+ * @note   实际输出频率 = 定时器时钟 / ((PSC+1)*(ARR+1))，直接读硬件寄存器：
+ *         - 不用 freq_int：SMD_Calc_PSC_ARR 对 ARR 整除截断，实际频率比设定值偏高，
+ *           最坏约 +0.8%（8kHz 附近），且随频率变化，用设定值积分会有随速度变化的系统偏差
+ *         - 不依赖 SMD_ApplyFreqToHW：SP 直接跳变(SMD_PWM_SetFreq)等路径不经过它，
+ *           从寄存器读才不会漏
+ *         每 1ms 走过的脉冲 = f(Hz)/1000，用微脉冲(1e-6)定点累加，无浮点累积误差
+ *         ARR 有预装载，寄存器值可能比实际输出超前不到一个周期（低频时才明显），
+ *         对累计值的影响不超过 1 个脉冲量级
+ */
+static void SMD_PulseCountTick(void)
+{
+    for (int ch = 0; ch < SMD_CH_MAX; ch++)
+    {
+        if (!SMD_PWM_IsOutputOn((SMD_Channel)ch)) continue;
+
+        const SMD_TimerMap *t = &smd_timer_map[ch];
+        const uint32_t arr    = t->handle->Instance->ARR;
+        const uint32_t psc    = t->handle->Instance->PSC;
+        const uint32_t timclk = (ch == SMD_CH2 || ch == SMD_CH4) ? 168000000u : 84000000u;
+        const uint32_t cnt_hz = timclk / (psc + 1u);
+
+        /* 每 1ms 微脉冲数 = f(Hz) * 1000 = cnt_hz * 1000 / (arr+1) */
+        const uint32_t up = (uint32_t)(((uint64_t)cnt_hz * 1000u) / ((uint64_t)arr + 1u));
+        if (up > (SMD_PWM_FREQ_MAX + 1000u) * 1000u) continue;   /* 定时器尚未配置合理频率(ARR过小)，不计 */
+
+        MotorPulseSub[ch] += up;
+        const uint32_t whole = MotorPulseSub[ch] / 1000000u;
+        if (whole > 0u)
+        {
+            MotorPulseSub[ch] -= whole * 1000000u;
+            MotorPulseTotal[ch] += whole;
+        }
+    }
+}
+
+/* 皮带位置用：读取指定通道的脉冲总数（32位读在 Cortex-M4 上是原子的） */
+uint32_t SMD_GetPulseTotal(SMD_Channel ch)
+{
+    return (ch < SMD_CH_MAX) ? MotorPulseTotal[ch] : 0u;
 }
 
 /* ========================= 内部：直接写入硬件定时器频率（不停PWM） ========================= */
@@ -720,6 +786,7 @@ static void SMD_ProcessChannel(SMD_Channel ch)
  * 每1ms依次：
  *   1. 对每个通道调用 SMD_ProcessChannel()（换向/限位检测 + S曲线一步）
  *   2. 对支持步数控制的通道做步数控制决策 SMD_MotorStepsCtl()
+ *   2.5 累计各通道输出脉冲总数 SMD_PulseCountTick()（皮带位置，见 SMD_GetPulseTotal）
  *   3. 推进"回原点"状态机 SMD_SysToOrigin()
  *   4. 推杆电机（M1/M2双路冗余）的限位/急停保护 API_MOTOR_CheckLimit()
  *   （OUT11/12继电器料车电机方案已停用，SMD_CheckRelayMotorLimit() 不再调用）
@@ -734,6 +801,8 @@ void TIM1_UP_TIM10_IRQHandler(void)
 
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
         SMD_MotorStepsCtl((SMD_Channel)ch);
+
+    SMD_PulseCountTick();   /* 必须在本 ms 的频率更新之后：按刚设好的 ARR 累计本 ms 输出的脉冲 */
 
     SMD_SysToOrigin();
 

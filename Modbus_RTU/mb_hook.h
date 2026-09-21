@@ -216,6 +216,13 @@
 #define SYS_TO_ORIGIN_ADDR         133     /* 系统上电回原点状态（只读，对应 GrippertoOrigin_P 枚举） */
 #define FBACK_CUR_STEPS_ADDR       134     /* 进退电机当前步数（只读） */
 
+/* 皮带（排发电机 MOTOR_PaiFa，物理通道 CH0）已输出脉冲总数，32 位拆成两个 16 位寄存器（只读）：
+ *   135 = 高 16 位，136 = 低 16 位（与 W1110/编码器的"先高后低"约定一致）
+ * 自由运行、只增不清、不分方向；一个脉冲 = 驱动器收到的一个 PU 脉冲。
+ * 上位机做无符号取模差分，不需要（也不应该）清零。 */
+#define BELT_PULSE_HIGH_ADDR       135
+#define BELT_PULSE_LOW_ADDR        136
+
 #define STOP_ALL_MOTOR_ADDR        (REG_HOLDING_NREGS - 1) /* 全部步进电机急停（写1触发） */
 
 /* 导出函数声明 ------------------------------------------------------------*/
