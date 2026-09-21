@@ -108,6 +108,20 @@ int main(void)
     MX_TIM11_Init();
     MX_TIM14_Init();
     /* USER CODE BEGIN 2 */
+    /* 修复S曲线抖动：CubeMX生成的定时器初始化默认关闭ARR预装载（ARPE=0），
+     * 而 api_smd.c 的 SMD_ApplyFreqToHW() 每1ms在周期中途写ARR，依赖ARPE=1
+     * 保证修改在下一个更新事件生效（无毛刺）。ARPE=0时，加减速阶段新ARR
+     * 小于当前CNT会使16位定时器一路计到0xFFFF才回绕（最长约65ms的拉长脉冲），
+     * 导致步数控制模式下电机抖动、且停不到目标位置。
+     * 这里把6路步进PWM定时器按ARPE=1重新初始化（旧板smd.c即如此）。
+     * 注意：必须改Init字段并重调HAL_TIM_PWM_Init，因为SMD_PWM_SetFreq()
+     * 内部会再次调用HAL_TIM_PWM_Init，按Init字段把ARPE写回寄存器。 */
+    htim2.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim2);
+    htim5.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim5);
+    htim8.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim8);
+    htim9.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim9);
+    htim13.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim13);
+    htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim14);
     Delay_Init();
     EEPROM_Init();
     mbh_init(&mbhMCU);
