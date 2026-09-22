@@ -5,8 +5,12 @@
   *          移植自 slj_stm32f407 项目 Core/Src/smd.c（8路版本），
   *          裁剪为本板 6 路通道，核心 S 曲线算法与步数控制逻辑保持一致，
   *          上位机仅需更换 Modbus 寄存器地址映射即可复用原有控制协议。
-  * @version V2.0.0
-  * @date    09-Sep-2026
+  *          另支持 M6TOSERVO_ENABLE=1 时把物理6号通道（SMD_CH5，PA1/TIM2_CH2）
+  *          改造为舵机控制：Modbus 槽位6寄存器重定义为 初始角度/角度a/角度b/
+  *          行程时长/启动触发/回读角度/控制口，详见本文件 M6TOSERVO_ENABLE
+  *          宏定义处的说明。
+  * @version V2.1.0
+  * @date    22-Sep-2026
   */
 #ifndef __API_SMD_H__
 #define __API_SMD_H__
@@ -59,6 +63,45 @@ extern "C" {
 #define SMD_UPDATE_DT_s         0.001f  // 1ms = 0.001s
 #define SMD_UPDATE_DT_ms        1u      // 1ms
 
+/* ==================== 6号步进电机舵机化开关（M6TOSERVO_ENABLE） ==================== */
+/**
+ * @brief 6号步进电机改造为舵机控制的编译开关
+ * @note  1 = 物理6号通道（SMD_CH5，PA1/TIM2_CH2）按舵机控制。
+ *        接线：PU(PA1) 输出 50Hz 舵机信号，EN6(PB0) 已硬件飞线接地（舵机
+ *        使能恒有效），DR6(PC4) 由固件拉低作舵机地线，舵机电源接 5V。
+ *        Modbus 槽位6（SMD_6_*_ADDR，地址50~56，SMD_SLOT_6_PHYS_CH=6）
+ *        寄存器含义重新定义：
+ *          +0 AM (50)  ：初始角度（0~360，输出限幅0~180），写入即保存EEPROM
+ *          +1 DR (51)  ：角度a，写入即保存EEPROM（DR6引脚始终拉低作舵机地线）
+ *          +2 ACC (52) ：角度b，写入即保存EEPROM
+ *          +3 JRK (53) ：行程时长ms（a→b耗时，上限65535），写入即保存EEPROM
+ *          +4 STEP (54)：一次性启动触发：写1执行一次 初始角→a（快速跳变）→
+ *                        a到b（按行程时长线性插值）→初始角（快速跳变）
+ *          +5 PU (55)  ：只读，回读当前实际角度
+ *          +6 SP (56)  ：控制口：写1=启动（同STEP=1），写0=停止自动化流程并
+ *                        回到初始角；回读 1=流程运行中 / 0=空闲
+ *        角度-脉宽映射与旧板 slj_stm32f407 舵机测试一致（正极性输出）：
+ *        0°=0.5ms、180°=2.5ms 高电平脉宽，超过180°按180°输出。
+ *        开机从EEPROM读参数（全0/全0xFF视为未初始化→写默认值：
+ *        初始角120/角度a 120/角度b 50/行程时长5500ms），并直接输出初始角度PWM。
+ *        0 = 维持原步进电机控制逻辑，与改动前完全一致。
+ */
+#define M6TOSERVO_ENABLE        1
+
+#if M6TOSERVO_ENABLE
+#define SERVO_CH                SMD_CH5      /* 舵机占用的物理通道（6号接口） */
+#define SERVO_PWM_FREQ_HZ       50u          /* 舵机信号频率 50Hz */
+#define SERVO_TIM_CNT_HZ        SMD_COUNTER_FREQ            /* 计数频率 1MHz（复用SMD参数） */
+#define SERVO_PWM_PSC           (84000000u / SERVO_TIM_CNT_HZ - 1u)  /* 83：TIM2挂APB1 84MHz */
+#define SERVO_PWM_ARR           (SERVO_TIM_CNT_HZ / SERVO_PWM_FREQ_HZ - 1u) /* 19999：20ms周期 */
+#define SERVO_ANGLE_MAX         360u         /* 寄存器允许写入的角度上限 */
+#define SERVO_ANGLE_PWM_MAX     180u         /* 脉宽映射上限（与上位机 clampAngle 一致） */
+#define SERVO_DEFAULT_INIT_ANGLE   120u      /* 默认：初始角度 */
+#define SERVO_DEFAULT_ANGLE_A      120u      /* 默认：角度a */
+#define SERVO_DEFAULT_ANGLE_B      50u       /* 默认：角度b */
+#define SERVO_DEFAULT_DURATION_MS   5500u    /* 默认：行程时长ms */
+#endif
+
 /* 步数控制刹车参数 */
 #define BRAKE_TARGET_HZ         100u    // 刹车目标速度 Hz
 #define BRAKE_BUFFER            100u    // 巡航缓冲步数（100Hz x 1s）
@@ -69,8 +112,8 @@ extern "C" {
  * @brief 6路PWM通道枚举
  * @note  每个通道对应固定的GPIO口和定时器通道（不可随意修改），
  *        同时与 main.h 中 SMD_DR(i)/SMD_EN(i)/SMD_AM(i) 的索引 i 一一对应。
- *        通道<->具体机械功能的绑定为本次移植时的假设，需与实际线束核对：
- *        与旧项目（slj_stm32f407）保持同样的顺序：排发/送发/进退/升降/夹爪/上料。
+ *        通道<->具体机械功能的绑定（2026-09 与上位机核对后的最新接线）：
+ *        排发/送发/进退/夹爪移动/送发辅助/舵机。
  */
 typedef enum {
     SMD_CH0 = 0,  // PA7 - TIM14_CH1 (普通PWM通道) / SMD_DR_1,EN_1,AM_1
@@ -80,15 +123,13 @@ typedef enum {
     SMD_CH2 = 2,  // PA5 - TIM8_CH1N (高级定时器互补通道) / SMD_DR_3,EN_3,AM_3
     MOTOR_FBack = SMD_CH2,          // 进退电机（步数控制）
     SMD_CH3 = 3,  // PA3 - TIM5_CH4 (普通PWM通道) / SMD_DR_4,EN_4,AM_4
-    MOTOR_UpDown = SMD_CH3,         // 升降电机（步数控制）
+    MOTOR_GripperMove = SMD_CH3,    // 夹爪移动电机（步数控制），原升降电机位置，升降电机已取消
     SMD_CH4 = 4,  // PA2 - TIM9_CH1 (普通PWM通道) / SMD_DR_5,EN_5,AM_5
-    MOTOR_GripperMove = SMD_CH4,    // 夹爪移动电机（步数控制）
-    SMD_CH5 = 5,  // PA1 - TIM2_CH2 (普通PWM通道) / SMD_DR_6,EN_6,AM_6
-    MOTOR_Feed = SMD_CH5,           // 别名沿用旧板命名，但上位机 Modbus 寄存器槽位6
-                                     // 的地址实际被"排发"命令占用（onControlMotor 里
-                                     // MOTOR_PaiFa 被重映射到 MOTOR_Feed 的地址），真正
-                                     // 驱动本通道(6号物理接口)的是槽位8（送发辅助电机）。
+                                     // 送发辅助电机：上位机槽位8（MOTOR_8）转接到本通道，
                                      // 详见 mb_hook.h 的 SMD_SLOT_x_PHYS_CH 系列宏
+    SMD_CH5 = 5,  // PA1 - TIM2_CH2 (普通PWM通道) / SMD_DR_6,EN_6,AM_6
+                                     // 舵机：M6TOSERVO_ENABLE=1 时本通道为舵机控制，
+                                     // PU 输出 50Hz 舵机信号，EN 脚硬件飞线接地
     SMD_CH_MAX
 } SMD_Channel;
 
@@ -153,6 +194,69 @@ extern SMD_StepsCtl_t g_motorStepsCtl[SMD_CH_MAX];
 extern GrippertoOrigin_P g_sysToOrigin;
 
 /* 导出函数声明 ------------------------------------------------------------*/
+
+#if M6TOSERVO_ENABLE
+/* 以下舵机接口仅 M6TOSERVO_ENABLE=1 时编译，寄存器语义见本文件
+ * M6TOSERVO_ENABLE 宏定义处的说明 */
+
+/**
+  * @brief  舵机初始化
+  * @note   TIM2_CH2 配置为 50Hz PWM 基时（PSC=83/ARR=19999）；从 EEPROM 载入
+  *         参数（全0/全0xFF 视为未初始化→写入默认值并保存）；DR6(PC4) 固定
+  *         输出低电平作为舵机地线（EN6 已硬件飞线接地）；并直接按初始角度
+  *         输出 PWM。
+  *         须在 EEPROM_Init() 之后调用。
+  */
+void SMD_Servo_Init(void);
+
+/**
+  * @brief  舵机 1ms 调度（TIM10 中断中调用）：推进 a→b 线性插值
+  */
+void SMD_Servo_Tick(void);
+
+/**
+  * @brief  启动一次完整流程：初始角→a（快速跳变）→a到b（按行程时长线性
+  *         插值）→初始角（快速跳变）。流程运行中调用会被忽略（由 mb_hook.c
+  *         的触发条件保证，需先 SP=0 停止后才能重新触发）。
+  */
+void SMD_Servo_StartSequence(void);
+
+/**
+  * @brief  停止自动化流程并快速回到初始角度（SP=0 控制口语义）
+  * @note   空闲时调用也只会跳到初始角度，无副作用
+  */
+void SMD_Servo_StopReturnInitial(void);
+
+/**
+  * @brief  急停：中止当前流程，保持当前角度输出不动（急停按钮/全局急停寄存器）
+  */
+void SMD_Servo_AbortHold(void);
+
+/**
+  * @brief  设置/获取配置参数（设置函数内部限幅并立即写入EEPROM保存）
+  * @param  angle  角度值（0~360，超过按360；输出时按0~180限幅映射脉宽）
+  * @param  ms     行程时长（a→b耗时，毫秒）
+  */
+void     SMD_Servo_SetInitialAngle(uint16_t angle);
+void     SMD_Servo_SetAngleA(uint16_t angle);
+void     SMD_Servo_SetAngleB(uint16_t angle);
+void     SMD_Servo_SetDurationMs(uint16_t ms);
+uint16_t SMD_Servo_GetInitialAngle(void);
+uint16_t SMD_Servo_GetAngleA(void);
+uint16_t SMD_Servo_GetAngleB(void);
+uint16_t SMD_Servo_GetDurationMs(void);
+
+/**
+  * @brief  获取舵机当前实际角度（已按0~180限幅，PU寄存器回读用）
+  */
+uint16_t SMD_Servo_GetCurrentAngle(void);
+
+/**
+  * @brief  舵机流程是否运行中（SP寄存器回读用）
+  * @retval 1=运行中，0=空闲
+  */
+uint8_t SMD_Servo_IsRunning(void);
+#endif
 
 /**
   * @brief  设置指定通道的目标频率，启动S曲线渐变

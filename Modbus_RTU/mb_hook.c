@@ -126,6 +126,25 @@ void mbs_hook_updata_holding(mbs *_mbs)
         int8_t ch = smd_slot_phys_ch[slot];
         if (ch < 0) continue;  /* 该槽位未接线，寄存器保持原值，不驱动硬件 */
 
+#if M6TOSERVO_ENABLE
+        /* 舵机通道（M6TOSERVO_ENABLE=1 时物理6号接口=舵机，寄存器语义见
+         * api_smd.h 的 M6TOSERVO_ENABLE 说明）：
+         * AM=初始角度 / DR=角度a / ACC=角度b / JRK=行程时长ms（EEPROM持久化参数）；
+         * STEP=一次性启动触发（只写，回读恒0）；PU=只读当前实际角度；
+         * SP=控制口，回读 1=流程运行中 / 0=空闲 */
+        if (ch == SERVO_CH)
+        {
+            _mbs->regHoldingBuf[SMD_SLOT_AM_ADDR(slot)]  = SMD_Servo_GetInitialAngle();
+            _mbs->regHoldingBuf[SMD_SLOT_DR_ADDR(slot)]  = SMD_Servo_GetAngleA();
+            _mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)] = SMD_Servo_GetAngleB();
+            _mbs->regHoldingBuf[SMD_SLOT_JRK_ADDR(slot)] = SMD_Servo_GetDurationMs();
+            _mbs->regHoldingBuf[SMD_SLOT_STEP_ADDR(slot)] = 0;
+            _mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)]  = SMD_Servo_GetCurrentAngle();
+            _mbs->regHoldingBuf[SMD_SLOT_SP_ADDR(slot)]  = SMD_Servo_IsRunning();
+            continue;
+        }
+#endif
+
         _mbs->regHoldingBuf[SMD_SLOT_AM_ADDR(slot)]  = SMD_AM_READ(ch);
         _mbs->regHoldingBuf[SMD_SLOT_DR_ADDR(slot)]  = SMD_DR_READ(ch);
         _mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)] = SMD_ACC_DATA[ch];
@@ -176,6 +195,10 @@ void mbs_hook_updata_holding(mbs *_mbs)
   *  STEP ：写入目标步数，进入步数控制模式（须在 PU 之前写入）
   *  PU   ：非步数模式→启动S曲线；步数模式→更新最大脉冲频率
   *  SP   ：写 0=急停；写 N>1=直接跳变到 N Hz
+  *  例外（M6TOSERVO_ENABLE=1 时槽位6为舵机，全部寄存器语义重定义，
+  *  详见 api_smd.h 的 M6TOSERVO_ENABLE 说明）：AM=初始角度、DR=角度a、
+  *  ACC=角度b、JRK=行程时长ms（以上写入即保存EEPROM）、STEP=写1启动一次
+  *  流程、SP=写1启动/写0停止并回初始角、PU=只读回读当前角度
   *  OUT13/14/15/16：兼容旧板"继电器料车电机"协议，13/14为主继电器对、
   *                   15/16为其冗余复制，四者统一解码后同步驱动 M1+M2
   *                   （M1/M2 是同一台电机的双路冗余接线，详见
@@ -183,9 +206,20 @@ void mbs_hook_updata_holding(mbs *_mbs)
   */
 void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
 {
+#if M6TOSERVO_ENABLE
+    /* 舵机槽位的全部寄存器不受 WRITE_HOLDING_V（=2）约定限制：
+     * 角度2°/时长2ms等都是合法值，不能被误当作"保持不变"标记丢弃。
+     * 由寄存器地址反查槽位->物理通道，接线映射改变时无需改这里 */
+    const uint16_t reg_slot     = _reg / 10u;
+    const uint8_t  is_servo_reg = (reg_slot < SMD_SLOT_COUNT) &&
+                                  (smd_slot_phys_ch[reg_slot] == SERVO_CH);
+#else
+    const uint8_t  is_servo_reg = 0;
+#endif
+
     /* WRITE_HOLDING_V（=2）保护：上位机批量写寄存器时用该值标记"保持不变"；
      * 系统上电回原点尚未完成时，也不接受任何控制写入 */
-    if ((_val == WRITE_HOLDING_V) || (g_sysToOrigin != toOriginSuccess))
+    if (((_val == WRITE_HOLDING_V) && !is_servo_reg) || (g_sysToOrigin != toOriginSuccess))
         return;
 
     _mbs->regHoldingBuf[_reg] = _val;
@@ -194,6 +228,60 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
     {
         int8_t ch = smd_slot_phys_ch[slot];
         if (ch < 0) continue;  /* 该槽位未接线，跳过，不驱动任何硬件 */
+
+#if M6TOSERVO_ENABLE
+        /* 舵机槽位寄存器（语义详见 api_smd.h 的 M6TOSERVO_ENABLE 说明）：
+         * AM=初始角度 / DR=角度a / ACC=角度b / JRK=行程时长ms：
+         *   写入即限幅并保存EEPROM（运行中的流程不受影响，下次触发/
+         *   SP=0回初始角时使用新参数），回写限幅后的实际值；
+         * STEP：写1启动一次流程（仅空闲时触发，运行中写1忽略，
+         *        避免周期重发的触发帧反复重启流程）；
+         * SP  ：写1=启动（同STEP），写0=停止自动化流程并回到初始角；
+         * PU  ：只读，写入忽略；
+         * "全部步进电机急停"寄存器：中止流程并保持当前角度 */
+        if (ch == SERVO_CH)
+        {
+            if (_reg == SMD_SLOT_AM_ADDR(slot))
+            {
+                SMD_Servo_SetInitialAngle(_mbs->regHoldingBuf[SMD_SLOT_AM_ADDR(slot)]);
+                _mbs->regHoldingBuf[SMD_SLOT_AM_ADDR(slot)] = SMD_Servo_GetInitialAngle();
+            }
+            else if (_reg == SMD_SLOT_DR_ADDR(slot))
+            {
+                SMD_Servo_SetAngleA(_mbs->regHoldingBuf[SMD_SLOT_DR_ADDR(slot)]);
+                _mbs->regHoldingBuf[SMD_SLOT_DR_ADDR(slot)] = SMD_Servo_GetAngleA();
+            }
+            else if (_reg == SMD_SLOT_ACC_ADDR(slot))
+            {
+                SMD_Servo_SetAngleB(_mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)]);
+                _mbs->regHoldingBuf[SMD_SLOT_ACC_ADDR(slot)] = SMD_Servo_GetAngleB();
+            }
+            else if (_reg == SMD_SLOT_JRK_ADDR(slot))
+            {
+                SMD_Servo_SetDurationMs(_mbs->regHoldingBuf[SMD_SLOT_JRK_ADDR(slot)]);
+                _mbs->regHoldingBuf[SMD_SLOT_JRK_ADDR(slot)] = SMD_Servo_GetDurationMs();
+            }
+            else if (_reg == SMD_SLOT_STEP_ADDR(slot))
+            {
+                /* 仅空闲时触发：运行中重复写1不再从头重启（周期重发的
+                 * 触发帧会导致舵机反复跳回角度a，表现为严重抖动）。
+                 * 需要重新开始时先写 SP=0 停止并回初始角 */
+                if (_mbs->regHoldingBuf[SMD_SLOT_STEP_ADDR(slot)] == 1 && !SMD_Servo_IsRunning())
+                    SMD_Servo_StartSequence();
+            }
+            else if (_reg == SMD_SLOT_SP_ADDR(slot))
+            {
+                const uint16_t sp = _mbs->regHoldingBuf[SMD_SLOT_SP_ADDR(slot)];
+                if (sp == 1 && !SMD_Servo_IsRunning()) SMD_Servo_StartSequence();
+                else if (sp == 0)                     SMD_Servo_StopReturnInitial();
+            }
+            else if (_reg == STOP_ALL_MOTOR_ADDR && _mbs->regHoldingBuf[STOP_ALL_MOTOR_ADDR] == 1)
+            {
+                SMD_Servo_AbortHold();
+            }
+            continue;
+        }
+#endif
 
         /* --- 方向控制（步数模式下忽略，方向由步数差自动决定） --- */
         if (!g_motorStepsCtl[ch].is_running)

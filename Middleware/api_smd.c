@@ -6,20 +6,24 @@
   *          按本板 6 路通道与 EN/AM 信号重新适配：
   *            - S曲线速度更新 / 换向保护 / 步数控制刹车预判：逻辑与原项目一致
   *            - 上电回原点状态机（SMD_SysToOrigin）与限位急停（SMD_IsLimited）：
-  *              沿用原项目对应机械结构（进退/升降/夹爪）的判定逻辑，
+  *              沿用原项目对应机械结构（进退/夹爪）的判定逻辑，
   *              IN/OUT 序号沿用原项目编号，需与实际线束核对
+  *            - 升降电机已取消：原 MOTOR_UpDown 通道（SMD_CH3，4号接口）现为
+  *              夹爪移动电机；6号接口（SMD_CH5）改造为舵机（M6TOSERVO_ENABLE=1，
+  *              见 api_smd.h 宏说明）
   *            - 继电器电机（原 OUT12/13 通过继电器正反转驱动的推杆电机）：
   *              硬件已改为 M1/M2 独立 PWM+MOS桥驱动并调通，限位急停逻辑见
   *              api_motor_control.c 的 API_MOTOR_CheckLimit()，在 TIM10 1ms
   *              中断里调用；旧板 OUT11(上升)/OUT12(下降) 继电器方案及对应的
   *              SMD_CheckRelayMotorLimit() 限位保护已停用（保留代码以注释形式
   *              存档，见本文件对应位置），不再驱动料车电机
-  * @version V2.0.0
-  * @date    09-Sep-2026
+  * @version V2.1.0
+  * @date    22-Sep-2026
   */
 #include "api_smd.h"
 #include "tim.h"
 #include "api_motor_control.h"
+#include "api_eeprom.h"
 #include <math.h>
 
 /* ========================= 硬件定时器映射表 ========================= */
@@ -46,6 +50,43 @@ static const SMD_TimerMap smd_timer_map[SMD_CH_MAX] =
     { &htim9,  TIM_CHANNEL_1, 0 },  // CH4 - PA2
     { &htim2,  TIM_CHANNEL_2, 0 },  // CH5 - PA1
 };
+
+#if M6TOSERVO_ENABLE
+/* ========================= 舵机控制（6号步进电机改造，见 api_smd.h 的 M6TOSERVO_ENABLE） ========================= */
+/* 配置参数默认值：EEPROM 未初始化（全0/全0xFF）时写入保存 */
+static const uint16_t servo_default_params[4] = {
+    SERVO_DEFAULT_INIT_ANGLE, SERVO_DEFAULT_ANGLE_A,
+    SERVO_DEFAULT_ANGLE_B,    SERVO_DEFAULT_DURATION_MS
+};
+
+/* 配置参数（EEPROM 持久化，AM/DR/ACC/JRK 寄存器写入时保存） */
+typedef struct
+{
+    uint16_t initial_angle;  /* 初始角度 0~360（输出限幅0~180） */
+    uint16_t angle_a;        /* 角度a */
+    uint16_t angle_b;        /* 角度b */
+    uint16_t duration_ms;    /* a→b行程时长 ms */
+} ServoCfg_t;
+
+static ServoCfg_t g_servo_cfg = {
+    SERVO_DEFAULT_INIT_ANGLE, SERVO_DEFAULT_ANGLE_A,
+    SERVO_DEFAULT_ANGLE_B,    SERVO_DEFAULT_DURATION_MS
+};
+
+/* 运动状态：IDLE=空闲保持当前角度；A_TO_B=按行程时长线性插值 a→b */
+typedef enum
+{
+    SERVO_IDLE = 0,
+    SERVO_A_TO_B = 1
+} ServoState_t;
+
+static ServoState_t g_servo_state       = SERVO_IDLE;
+static uint32_t     g_servo_elapsed_ms  = 0;     /* 本次插值已运行 ms */
+static uint32_t     g_servo_duration_ms = 0;     /* 本次插值时长快照 */
+static float        g_servo_start_angle = 0.0f;  /* 本次插值起点快照 */
+static float        g_servo_target_angle = 0.0f; /* 本次插值终点快照 */
+static float        g_servo_cur_angle   = 0.0f;  /* 当前输出角度（未限幅） */
+#endif
 
 /* ========================= 全局变量 ========================= */
 
@@ -174,6 +215,9 @@ static void SMD_PulseCountTick(void)
 {
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
     {
+#if M6TOSERVO_ENABLE
+        if (ch == SERVO_CH) continue;  /* 舵机通道：50Hz是伺服信号不是步进脉冲，不计数 */
+#endif
         if (!SMD_PWM_IsOutputOn((SMD_Channel)ch)) continue;
 
         const SMD_TimerMap *t = &smd_timer_map[ch];
@@ -271,6 +315,239 @@ HAL_StatusTypeDef SMD_PWM_Stop(SMD_Channel ch)
     return t->is_complementary ? HAL_TIMEx_PWMN_Stop(t->handle, t->tim_channel)
                                 : HAL_TIM_PWM_Stop   (t->handle, t->tim_channel);
 }
+
+#if M6TOSERVO_ENABLE
+/* ========================= 舵机控制（仅 M6TOSERVO_ENABLE=1 时编译） ========================= */
+
+/**
+ * @brief  角度->比较寄存器值（正极性输出，与旧板 slj_stm32f407 舵机测试一致）
+ * @note   旧板映射（Core/Src/smd.c 的 SMD_DUTY_DATA + mb_hook.c 舵机测试）：
+ *         DUTY 25~125（0.1%单位）对应 0.5~2.5ms 高电平脉宽，0°=0.5ms、
+ *         180°=2.5ms、90°=1.5ms 中位。PWM1+OCPolarity HIGH 下 CCR 即高电平
+ *         计数：CCR = 500 + 角度×1000/90（计数频率 1MHz，PSC=83）。
+ *         注意：上位机 servoworker 的 sysfs PWM 写 100%-logicDuty 是因为它的
+ *         输出经外部驱动级反相，本板 PU 直连舵机，必须正极性输出。
+ *         超过180°按180°输出（与上位机 clampAngle 0~180 一致），因此寄存器
+ *         虽接受0~360，实际输出封顶180°。
+ */
+static uint32_t Servo_AngleToCCR(float angle_deg)
+{
+    if (angle_deg < 0.0f) angle_deg = 0.0f;
+    if (angle_deg > (float)SERVO_ANGLE_PWM_MAX) angle_deg = (float)SERVO_ANGLE_PWM_MAX;
+
+    /* 高电平脉宽计数：0°=500(0.5ms) ~ 180°=2500(2.5ms) */
+    return 500u + (uint32_t)(angle_deg * 1000.0f / 90.0f + 0.5f);
+}
+
+/**
+ * @brief  输出指定角度：写比较值并确保 PWM 通道开启（立即生效，无插值）
+ * @note   CCR 预装载开启（MX_TIM2_Init 配置通道时置位），占空比在下一个
+ *         更新事件生效，不会产生毛刺；快速运动=直接跳变，舵机以自身
+ *         最大机械速度跟随（与上位机 jumpToAngle 一致）
+ */
+static void Servo_WriteAngle(float angle_deg)
+{
+    const SMD_TimerMap *t = &smd_timer_map[SERVO_CH];
+    __HAL_TIM_SET_COMPARE(t->handle, t->tim_channel, Servo_AngleToCCR(angle_deg));
+    SMD_PWM_Start(SERVO_CH);
+    g_servo_cur_angle = angle_deg;
+}
+
+/**
+ * @brief  从 EEPROM 载入配置参数：全0/全0xFF（未初始化）时写入默认值
+ * @note   全新 24C02 擦除态读出 0xFF，旧板可能残留 0x00，两种都按
+ *         "未初始化"处理并写默认值保存；读入后角度限幅0~360
+ */
+static void Servo_LoadParams(void)
+{
+    uint16_t buf[4] = {0, 0, 0, 0};
+    uint8_t all_zero = 1, all_ff = 1;
+
+    EEPROM_ReadData(AT24Cxx_SERVO_PARAMS_ADDR, (uint8_t *)buf, sizeof(buf));
+    for (int i = 0; i < 4; i++)
+    {
+        if (buf[i] != 0u)      all_zero = 0;
+        if (buf[i] != 0xFFFFu) all_ff   = 0;
+    }
+    if (all_zero || all_ff)
+    {
+        for (int i = 0; i < 4; i++) buf[i] = servo_default_params[i];
+        EEPROM_WriteData(AT24Cxx_SERVO_PARAMS_ADDR, (uint8_t *)buf, sizeof(buf));
+    }
+
+    g_servo_cfg.initial_angle = (buf[0] > SERVO_ANGLE_MAX) ? SERVO_ANGLE_MAX : buf[0];
+    g_servo_cfg.angle_a       = (buf[1] > SERVO_ANGLE_MAX) ? SERVO_ANGLE_MAX : buf[1];
+    g_servo_cfg.angle_b       = (buf[2] > SERVO_ANGLE_MAX) ? SERVO_ANGLE_MAX : buf[2];
+    g_servo_cfg.duration_ms   = buf[3];
+}
+
+/**
+ * @brief  配置参数写入 EEPROM（AM/DR/ACC/JRK 寄存器写入时调用）
+ */
+static void Servo_SaveParams(void)
+{
+    const uint16_t buf[4] = { g_servo_cfg.initial_angle, g_servo_cfg.angle_a,
+                              g_servo_cfg.angle_b,       g_servo_cfg.duration_ms };
+    EEPROM_WriteData(AT24Cxx_SERVO_PARAMS_ADDR, (uint8_t *)buf, sizeof(buf));
+}
+
+/**
+ * @brief  舵机初始化：50Hz 基时 + 载入EEPROM参数 + 直接输出初始角度PWM
+ * @note   开机即按配置的初始角度输出（不再等待上位机指令）。
+ *         EN6(PB0) 已硬件飞线接地（舵机使能恒有效），DR6(PC4) 固定输出
+ *         低电平，作为舵机地线（PU 接信号线、5V 接正极）。
+ *         本函数须在 main.c 的 ARPE 重新初始化块之后调用，此时
+ *         htim2.Init.AutoReloadPreload 已置 ENABLE，HAL_TIM_PWM_Init()
+ *         会把 50Hz 的 PSC/ARR 连同 ARPE=1 一起写入寄存器（与其余
+ *         5路步进定时器一致）。占空比只在 CCR 预装载开启的前提下才能
+ *         无毛刺切换，ARPE 对 CCR 无影响，CCR 预装载由 MX_TIM2_Init()
+ *         配置通道时置位，这里不再重复配置通道。
+ */
+void SMD_Servo_Init(void)
+{
+    const SMD_TimerMap *t = &smd_timer_map[SERVO_CH];
+
+    /* 50Hz 基时：TIM2 挂 APB1 84MHz，PSC=83 得 1MHz 计数，ARR=19999 得 20ms 周期。
+     * HAL_TIM_PWM_Init() 只重写 PSC/ARR/CR1 基时寄存器（内部走 TIM_Base_SetConfig），
+     * 通道配置（CCMR/CCER 等）保持 MX_TIM2_Init() 的原样不动 */
+    t->handle->Init.Prescaler = SERVO_PWM_PSC;
+    t->handle->Init.Period    = SERVO_PWM_ARR;
+    HAL_TIM_PWM_Init(t->handle);
+
+    /* DR6 拉低作舵机地线（本通道已从步进调度中排除，引脚不会被翻电平） */
+    SMD_DR(SERVO_CH, 0);
+
+    /* 载入EEPROM参数（未初始化则写默认值），并按初始角度直接输出 PWM */
+    Servo_LoadParams();
+    g_servo_state = SERVO_IDLE;
+    Servo_WriteAngle((float)g_servo_cfg.initial_angle);
+}
+
+/**
+ * @brief  启动一次完整流程：初始角→a（快速跳变）→a到b（线性插值）→初始角（快速跳变）
+ * @note   触发条件（mb_hook.c）保证仅空闲时调用，运行中重复触发会被忽略，
+ *         避免周期重发的触发帧让舵机反复跳回角度a。插值参数（角度a/b/时长）
+ *         在启动时快照，运行期间写入的新配置参数不影响本次流程，下次触发生效
+ */
+void SMD_Servo_StartSequence(void)
+{
+    /* 快速跳变到角度a（舵机以自身最大机械速度运动） */
+    Servo_WriteAngle((float)g_servo_cfg.angle_a);
+
+    g_servo_elapsed_ms   = 0;
+    g_servo_duration_ms  = g_servo_cfg.duration_ms;
+    g_servo_start_angle  = (float)g_servo_cfg.angle_a;
+    g_servo_target_angle = (float)g_servo_cfg.angle_b;
+    g_servo_state        = SERVO_A_TO_B;
+}
+
+/**
+ * @brief  停止自动化流程并快速回到初始角度（SP=0 控制口语义）
+ * @note   空闲时调用只会跳到初始角度，无副作用
+ */
+void SMD_Servo_StopReturnInitial(void)
+{
+    g_servo_state = SERVO_IDLE;
+    Servo_WriteAngle((float)g_servo_cfg.initial_angle);
+}
+
+/**
+ * @brief  急停：中止当前流程，保持当前角度输出不动
+ * @note   急停按钮（TIM10 1ms 检测）与"全部步进电机急停"寄存器共用；
+ *         保持当前角度 = 机构原地冻结，不做任何未预期的运动
+ */
+void SMD_Servo_AbortHold(void)
+{
+    g_servo_state = SERVO_IDLE;
+}
+
+/**
+ * @brief  舵机 1ms 调度（TIM10 中断）：推进 a→b 线性插值
+ * @note   线性插值与上位机 servoworker 一致（上位机 tick 5ms，此处 1ms 更细）。
+ *         行程时长=0 时首个 tick 直接结束（跳回初始角）
+ */
+void SMD_Servo_Tick(void)
+{
+    if (g_servo_state != SERVO_A_TO_B) return;
+
+    if (g_servo_elapsed_ms >= g_servo_duration_ms)
+    {
+        /* a→b 完成：快速回到初始角度，结束本次流程 */
+        g_servo_state = SERVO_IDLE;
+        Servo_WriteAngle((float)g_servo_cfg.initial_angle);
+        return;
+    }
+
+    g_servo_elapsed_ms++;
+    const float ratio = (float)g_servo_elapsed_ms / (float)g_servo_duration_ms;
+    Servo_WriteAngle(g_servo_start_angle +
+                     (g_servo_target_angle - g_servo_start_angle) * ratio);
+}
+
+/* 配置参数设置/获取（设置时立即写入EEPROM保存，供下次开机使用） */
+void SMD_Servo_SetInitialAngle(uint16_t angle)
+{
+    if (angle > SERVO_ANGLE_MAX) angle = SERVO_ANGLE_MAX;
+    if (g_servo_cfg.initial_angle != angle)
+    {
+        g_servo_cfg.initial_angle = angle;
+        Servo_SaveParams();
+    }
+}
+
+void SMD_Servo_SetAngleA(uint16_t angle)
+{
+    if (angle > SERVO_ANGLE_MAX) angle = SERVO_ANGLE_MAX;
+    if (g_servo_cfg.angle_a != angle)
+    {
+        g_servo_cfg.angle_a = angle;
+        Servo_SaveParams();
+    }
+}
+
+void SMD_Servo_SetAngleB(uint16_t angle)
+{
+    if (angle > SERVO_ANGLE_MAX) angle = SERVO_ANGLE_MAX;
+    if (g_servo_cfg.angle_b != angle)
+    {
+        g_servo_cfg.angle_b = angle;
+        Servo_SaveParams();
+    }
+}
+
+void SMD_Servo_SetDurationMs(uint16_t ms)
+{
+    if (g_servo_cfg.duration_ms != ms)
+    {
+        g_servo_cfg.duration_ms = ms;
+        Servo_SaveParams();
+    }
+}
+
+uint16_t SMD_Servo_GetInitialAngle(void) { return g_servo_cfg.initial_angle; }
+uint16_t SMD_Servo_GetAngleA(void)       { return g_servo_cfg.angle_a; }
+uint16_t SMD_Servo_GetAngleB(void)       { return g_servo_cfg.angle_b; }
+uint16_t SMD_Servo_GetDurationMs(void)   { return g_servo_cfg.duration_ms; }
+
+/**
+ * @brief  获取舵机当前实际角度（按0~180限幅后取整，PU寄存器回读用）
+ */
+uint16_t SMD_Servo_GetCurrentAngle(void)
+{
+    float a = g_servo_cur_angle;
+    if (a < 0.0f) a = 0.0f;
+    if (a > (float)SERVO_ANGLE_PWM_MAX) a = (float)SERVO_ANGLE_PWM_MAX;
+    return (uint16_t)(a + 0.5f);
+}
+
+/**
+ * @brief  舵机流程是否运行中（SP寄存器回读用）
+ */
+uint8_t SMD_Servo_IsRunning(void)
+{
+    return (g_servo_state != SERVO_IDLE) ? 1u : 0u;
+}
+#endif /* M6TOSERVO_ENABLE */
 
 /* ========================= 频率直接设置（阻塞，用于SP寄存器直接跳变） ========================= */
 HAL_StatusTypeDef SMD_PWM_SetFreq(SMD_Channel ch, uint32_t freq)
@@ -373,20 +650,18 @@ int32_t SMD_CalcAccNeedSteps(float v_current, float a_current,
  * @brief  各通道限位开关检测，触发时立即急停该通道
  * @note   判定逻辑沿用旧项目 slj_stm32f407（同一台机械结构，仅下位机板卡不同），
  *         Incom_ID 别名定义见 main.h，需与实际线束核对一致：
- *           升降电机(MOTOR_UpDown)：Incom_LiftLimit 上限位
  *           进退电机(MOTOR_FBack) ：Incom_FBackRetreatLimit/Incom_FBackWorkLimit 双向限位
  *           夹爪电机(MOTOR_GripperMove)：Incom_GripperHomeLimit/Incom_GripperGripLimit 双向限位，
  *             Incom_FeedHair 联锁触发、RELAY_1 联锁触发
  *           急停：Incom_Estop，作用于全部通道
+ *           升降电机已取消（原 Incom_LiftLimit 输入仅作回读，不再参与限位逻辑）；
+ *           舵机通道（SERVO_CH）不进入本函数（见 TIM10 中断调度）
  */
 static uint8_t SMD_IsLimited(int ch, uint8_t cur_dir, SMD_Freq_Gradient *m)
 {
     uint8_t hit = 0;
     switch (ch)
     {
-        case MOTOR_UpDown:
-            hit = (!IN_READ(Incom_LiftLimit) && !cur_dir);
-            break;
         case MOTOR_FBack:
             hit = ((!IN_READ(Incom_FBackRetreatLimit) && !cur_dir) ||
                    (!IN_READ(Incom_FBackWorkLimit) && cur_dir));
@@ -431,9 +706,9 @@ static uint8_t SMD_IsLimited(int ch, uint8_t cur_dir, SMD_Freq_Gradient *m)
 /* ========================= 内部：步数控制决策（每通道每1ms） ========================= */
 /**
  * @brief  步数控制状态机：给定目标步数，自动判断方向、加速->巡航->预判刹车->精确停止
- * @note   仅 MOTOR_FBack / MOTOR_UpDown / MOTOR_GripperMove 三个通道支持步数控制，
- *         其余通道（PaiFa/Trans/Feed）仅支持连续S曲线调速（PU/ACC/JRK/SP），
- *         与旧项目一致。
+ * @note   仅 MOTOR_FBack / MOTOR_GripperMove 两个通道支持步数控制，
+ *         其余通道（PaiFa/Trans/送发辅助）仅支持连续S曲线调速（PU/ACC/JRK/SP），
+ *         与旧项目一致。舵机通道（SERVO_CH）不进入本函数（见 TIM10 中断调度）。
  */
 static void SMD_MotorStepsCtl(SMD_Channel ch)
 {
@@ -443,11 +718,10 @@ static void SMD_MotorStepsCtl(SMD_Channel ch)
     int32_t step_remain = (int32_t)g_motorStepsCtl[ch].targetSteps - (int32_t)MotorCurStepsU[ch];
 
     /* 限位直达模式：targetSteps==0 向原点限位，targetSteps==0xFFFF 向远端限位
-     * 升降电机  cur_dir=0 上升->上限位 Incom_LiftLimit，只有原点限位，不支持 0xFFFF
      * 夹爪电机  cur_dir=0->Incom_GripperHomeLimit  cur_dir=1->Incom_GripperGripLimit
      * 进退电机  targetSteps==0 走正常步数控制回零，不走限位直达 */
     if ((g_motorStepsCtl[ch].targetSteps == 0 && ch != MOTOR_FBack) ||
-        (g_motorStepsCtl[ch].targetSteps == 0xFFFFu && ch != MOTOR_UpDown))
+        (g_motorStepsCtl[ch].targetSteps == 0xFFFFu))
     {
         uint8_t target_dir = (g_motorStepsCtl[ch].targetSteps == 0) ? 0u : 1u;
         if (ch == MOTOR_FBack) target_dir = 0u;
@@ -790,6 +1064,10 @@ static void SMD_ProcessChannel(SMD_Channel ch)
  *   3. 推进"回原点"状态机 SMD_SysToOrigin()
  *   4. 推杆电机（M1/M2双路冗余）的限位/急停保护 API_MOTOR_CheckLimit()
  *   （OUT11/12继电器料车电机方案已停用，SMD_CheckRelayMotorLimit() 不再调用）
+ *
+ * M6TOSERVO_ENABLE=1 时：物理6号通道（SERVO_CH）不参与第1/2/2.5步
+ * （舵机不走步进逻辑），改由第3.5步调度：SMD_Servo_Tick() 推进 a→b
+ * 线性插值，急停按钮触发时 SMD_Servo_AbortHold() 中止流程并保持当前角度。
  */
 void TIM1_UP_TIM10_IRQHandler(void)
 {
@@ -797,12 +1075,31 @@ void TIM1_UP_TIM10_IRQHandler(void)
     __HAL_TIM_CLEAR_FLAG(&htim10, TIM_FLAG_UPDATE);
 
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
+    {
+#if M6TOSERVO_ENABLE
+        if (ch == SERVO_CH) continue;  /* 舵机通道：不走步进S曲线/换向/限位逻辑 */
+#endif
         SMD_ProcessChannel((SMD_Channel)ch);
+    }
 
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
+    {
+#if M6TOSERVO_ENABLE
+        if (ch == SERVO_CH) continue;  /* 舵机通道：不支持步数控制 */
+#endif
         SMD_MotorStepsCtl((SMD_Channel)ch);
+    }
 
     SMD_PulseCountTick();   /* 必须在本 ms 的频率更新之后：按刚设好的 ARR 累计本 ms 输出的脉冲 */
+
+#if M6TOSERVO_ENABLE
+    /* 舵机 a→b 线性插值推进（1ms）；急停按钮触发时中止流程并保持
+     * 当前角度（与其他电机通道"急停=立即停止运动"语义一致），
+     * 空闲时保持输出不变 */
+    SMD_Servo_Tick();
+    if (!IN_READ(Incom_Estop))
+        SMD_Servo_AbortHold();
+#endif
 
     SMD_SysToOrigin();
 

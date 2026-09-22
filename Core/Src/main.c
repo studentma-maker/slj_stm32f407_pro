@@ -127,8 +127,17 @@ int main(void)
     mbh_init(&mbhMCU);
     mbs_init(&mbsUSB);
     API_MOTOR_Init(&htim4, 5000);
+#if M6TOSERVO_ENABLE
+    /* 舵机初始化：TIM2_CH2 配 50Hz 基时，从EEPROM载入参数
+     * （全0/全0xFF时写默认值 120/120/50/5500ms），并按初始角度直接
+     * 输出 PWM；DR6 拉低作舵机地线（EN6 已硬件飞线接地） */
+    SMD_Servo_Init();
+#endif
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
     {
+#if M6TOSERVO_ENABLE
+        if (ch == SERVO_CH) continue;  /* 舵机通道：跳过步进S曲线启动 */
+#endif
         SMD_PWM_SetFreqGradient((SMD_Channel)ch, SMD_PU_DATA[ch], SMD_ACC_DATA[ch]);
     }
 

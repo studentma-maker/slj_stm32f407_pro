@@ -39,7 +39,8 @@
  *     FBACK_CUR_STEPS_ADDR，地址与旧板一致）。
  *
  * 上位机把电机寄存器分成 8 个槽位（对应旧板 8 路电机），但新板只有 6 路
- * 物理步进通道。槽位地址（SMD_1~8_xxx_ADDR / SMD_SLOT_xxx_ADDR(slot)）与
+ * 物理通道（其中6号接口已改造为舵机，见 api_smd.h 的 M6TOSERVO_ENABLE）。
+ * 槽位地址（SMD_1~8_xxx_ADDR / SMD_SLOT_xxx_ADDR(slot)）与
  * 物理通道（SMD_CH0~SMD_CH5）之间的转接关系由本文件下方的
  * SMD_SLOT_x_PHYS_CH 系列宏统一定义，改接线只需要改那几个数字。
  *------------------------------------------------------------------------*/
@@ -93,7 +94,8 @@
 
 /* 槽位7、8：新板没有对应的物理通道，但上位机协议（reg_map.h）里这两组地址
  * 依然存在（MOTOR_7 保留未用，MOTOR_8 被 onControlFeedSpeed() 用作"送发辅助
- * 电机"），必须占住这两段地址空间，写入才能落到正确的寄存器上 */
+ * 电机"，转接到5号物理接口），必须占住这两段地址空间，写入才能落到正确的
+ * 寄存器上 */
 #define SMD_7_AM_ADDR              60       /* 报警信号（未使用） */
 #define SMD_7_DR_ADDR              61
 #define SMD_7_ACC_ADDR             62
@@ -121,33 +123,39 @@
 #define SMD_SLOT_PU_ADDR(slot)     (SMD_SLOT_REG_BASE(slot) + 5)
 #define SMD_SLOT_SP_ADDR(slot)     (SMD_SLOT_REG_BASE(slot) + 6)
 
-/* ==================== 寄存器槽位(1~8) -> 板上物理步进通道(1~6)接线映射 ====================
+/* ==================== 寄存器槽位(1~8) -> 板上物理通道(1~6)接线映射 ====================
  * 上位机 Modbus 协议按旧板 8 路电机划分寄存器槽位（slj_kickpi_qt_pro 的
- * common/reg_map.h），新板只有 6 路物理步进通道。改接线只需要改下面这 8 个
+ * common/reg_map.h），新板只有 6 路物理通道。改接线只需要改下面这 8 个
  * 数字，不用碰 mb_hook.c 里的任何逻辑。取值 1~6 表示接到板上第几路（对应
  * api_smd.h 的 SMD_CH0~SMD_CH5，下标=数值-1）；取值 0 表示该槽位没有实际
  * 接线，下位机忽略对应寄存器的写入。
  *
  * 当前取值来自与你确认过的接线关系（2026-09 核对上位机 mainworker.cpp 源码）：
  *   - 槽位1（MOTOR_PaiFa 自身地址）：上位机 onControlMotor() 里排发电机的命令
- *     被重映射发到了槽位6（MOTOR_Feed）的地址，槽位1这段地址上位机实际不发，
- *     设为 0（不接线），避免和槽位6同时驱动1号通道产生冲突
+ *     被重映射发到了槽位5（MOTOR_Feed）的地址，槽位1这段地址上位机实际不发，
+ *     设为 0（不接线），避免和槽位5同时驱动1号通道产生冲突
  *   - 槽位2（MOTOR_Trans 送发）：上位机直接用自己的地址发送，不重映射 → 直连2号
  *   - 槽位3（MOTOR_FBack 进退）：上位机直连，不重映射 → 直连3号
- *   - 槽位4（MOTOR_UpDown 升降）：上位机未见实际使用，先按直连4号处理
- *   - 槽位5（MOTOR_GripperMove 夹爪）：上位机直连，不重映射 → 直连5号
- *   - 槽位6（MOTOR_Feed 上料）：上位机排发电机命令实际发到这里 → 转接到1号
+ *   - 槽位4（MOTOR_GripperMove 夹爪移动）：上位机直连，不重映射 → 直连4号
+ *     （升降电机已取消，原 MOTOR_UpDown 槽位改由夹爪移动电机使用）
+ *   - 槽位5（MOTOR_Feed 上料）：上位机排发电机命令实际发到这里 → 转接到1号
+ *   - 槽位6：舵机。6号物理接口已改造为舵机（api_smd.h 的 M6TOSERVO_ENABLE），
+ *     本槽位寄存器语义全部重定义（地址50~56）：
+ *       AM(50)=初始角度、DR(51)=角度a、ACC(52)=角度b、JRK(53)=行程时长ms
+ *       （以上写入即保存EEPROM）；STEP(54)=写1启动一次流程（初始角→a快速
+ *       跳变→a到b按行程时长线性插值→初始角快速跳变）；PU(55)=只读回读
+ *       当前角度；SP(56)=写1启动/写0停止并回初始角
  *   - 槽位7：上位机未使用 → 不接线
- *   - 槽位8（MOTOR_8，onControlFeedSpeed 里的送发辅助电机）→ 转接到6号
+ *   - 槽位8（MOTOR_8，onControlFeedSpeed 里的送发辅助电机）→ 转接到5号
  */
 #define SMD_SLOT_1_PHYS_CH        0   /* 排发自身地址，上位机实际不发，不接线 */
 #define SMD_SLOT_2_PHYS_CH        2   /* 送发 Trans，直连2号 */
 #define SMD_SLOT_3_PHYS_CH        3   /* 进退 FBack，直连3号 */
-#define SMD_SLOT_4_PHYS_CH        4   /* 升降 UpDown，直连4号 */
-#define SMD_SLOT_5_PHYS_CH        5   /* 夹爪 GripperMove，直连5号 */
-#define SMD_SLOT_6_PHYS_CH        1   /* 上料 Feed：排发命令实际落在这里，转接到1号 */
+#define SMD_SLOT_4_PHYS_CH        4   /* 夹爪移动 GripperMove，直连4号 */
+#define SMD_SLOT_5_PHYS_CH        1   /* 上料 Feed：排发命令实际落在这里，转接到1号 */
+#define SMD_SLOT_6_PHYS_CH        6   /* 舵机：转接到6号，寄存器语义见上方 M6TOSERVO_ENABLE 说明 */
 #define SMD_SLOT_7_PHYS_CH        0   /* 未使用，不接线 */
-#define SMD_SLOT_8_PHYS_CH        6   /* 送发辅助电机，转接到6号 */
+#define SMD_SLOT_8_PHYS_CH        5   /* 送发辅助电机，转接到5号 */
 
 #define SMD_SLOT_COUNT             8
 
@@ -210,8 +218,8 @@
 #define IN_19_ADDR                 130      /* 输入信号 */
 #define IN_20_ADDR                 131      /* 输入信号 */
 
-/* 步数只读回读：旧板同样只为夹爪电机、进退电机两路开了专用寄存器
- * （升降电机在旧板上也没有当前步数回读寄存器），地址与旧板完全一致 */
+/* 步数只读回读：旧板同样只为夹爪电机、进退电机两路开了专用寄存器，
+ * 地址与旧板完全一致 */
 #define GRIPPER_CUR_STEPS_ADDR     132     /* 夹爪电机当前步数（只读） */
 #define SYS_TO_ORIGIN_ADDR         133     /* 系统上电回原点状态（只读，对应 GrippertoOrigin_P 枚举） */
 #define FBACK_CUR_STEPS_ADDR       134     /* 进退电机当前步数（只读） */

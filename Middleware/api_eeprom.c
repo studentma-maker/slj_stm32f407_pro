@@ -31,6 +31,8 @@ enum
     AT24Cxx_MCU_BAUD_ADDR       = AT24Cxx_MCU_SLAVE_ADDR + 1,
     /* MCU通信modbus校验位存储地址 */
     AT24CXX_MCU_PARITY_ADDR     = AT24Cxx_MCU_BAUD_ADDR + 4
+    /* 舵机参数存储地址=16（4×uint16：初始角度/角度a/角度b/行程时长ms），
+     * 由 api_smd.c 舵机模块读写，宏定义见 api_eeprom.h 的 AT24Cxx_SERVO_PARAMS_ADDR */
 };
 
 /* EEPROM读写引脚定义 */
