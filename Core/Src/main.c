@@ -115,13 +115,21 @@ int main(void)
      * 导致步数控制模式下电机抖动、且停不到目标位置。
      * 这里把6路步进PWM定时器按ARPE=1重新初始化（旧板smd.c即如此）。
      * 注意：必须改Init字段并重调HAL_TIM_PWM_Init，因为SMD_PWM_SetFreq()
-     * 内部会再次调用HAL_TIM_PWM_Init，按Init字段把ARPE写回寄存器。 */
-    htim2.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim2);
-    htim5.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim5);
-    htim8.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim8);
-    htim9.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim9);
-    htim13.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim13);
-    htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE; HAL_TIM_PWM_Init(&htim14);
+     * 内部会再次调用HAL_TIM_PWM_Init，按Init字段把ARPE写回寄存器。
+     *
+     * 同时把 Init.Period 写为 19999（20ms 占位周期）：CubeMX 给 32 位定时器
+     * （TIM2/TIM5）生成的 ARR=0xFFFFFFFF 若残留在影子寄存器里，ARPE=1 下
+     * 运行中写入的新 ARR 要等计数器溢出（1MHz 计数 ≈71 分钟）才出现第一个
+     * 更新事件——期间 PWM 引脚无脉冲（表现为开机后电机延迟执行、S曲线/步数
+     * 计数空跑）。HAL_TIM_PWM_Init 内部会生成更新事件把占位周期立即锁入
+     * 影子寄存器，此后任何一次启动最迟 20ms 内生效。配合 api_smd.c 的
+     * SMD_Calc_PSC_ARR 最低 50Hz 钳位，运行时不再需要生成更新事件。 */
+    htim2.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; htim2.Init.Period  = 19999; HAL_TIM_PWM_Init(&htim2);
+    htim5.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; htim5.Init.Period  = 19999; HAL_TIM_PWM_Init(&htim5);
+    htim8.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; htim8.Init.Period  = 19999; HAL_TIM_PWM_Init(&htim8);
+    htim9.Init.AutoReloadPreload  = TIM_AUTORELOAD_PRELOAD_ENABLE; htim9.Init.Period  = 19999; HAL_TIM_PWM_Init(&htim9);
+    htim13.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE; htim13.Init.Period = 19999; HAL_TIM_PWM_Init(&htim13);
+    htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE; htim14.Init.Period = 19999; HAL_TIM_PWM_Init(&htim14);
     Delay_Init();
     EEPROM_Init();
     mbh_init(&mbhMCU);

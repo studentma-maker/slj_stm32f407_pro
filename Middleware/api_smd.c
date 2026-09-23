@@ -160,6 +160,17 @@ static void SMD_Calc_PSC_ARR(uint32_t freq, uint32_t *psc, uint32_t *arr, int ch
     if (freq < SMD_PWM_FREQ_MIN) freq = SMD_PWM_FREQ_MIN;
     if (freq > SMD_PWM_FREQ_MAX) freq = SMD_PWM_FREQ_MAX;
 
+    /* 硬件最低 50Hz（20ms周期）：1Hz 是"减速停止"的软件哨兵值，不能让硬件
+     * 真正按 1Hz 输出——32位定时器（TIM2/5）的 ARR 能容纳 999999（1秒周期），
+     * 该值一旦锁进预装载影子寄存器，下一个更新事件要等 1 秒，期间 S曲线
+     * 缓起在软件里"空跑"完，1 秒后频率直接跳到接近目标值，表现为没有
+     * 加减速过程（16位定时器写 999999 截断成 16959≈65.5ms，所以以前
+     * 夹爪在 TIM9 上感觉不到）。钳位后最长的陈旧锁存周期 ≤20ms，缓起
+     * 最多提前 20ms，不可感知。真实运动最低 100Hz（BRAKE_TARGET_HZ），
+     * 不受影响。与 main.c 的 Init.Period=19999 占位周期配合，保证 ARR
+     * 影子寄存器里永远不存在超长周期，运行时无需生成更新事件。 */
+    if (freq < 50u) freq = 50u;
+
     if (ch == SMD_CH2 || ch == SMD_CH4)
         *psc = (168000000 / SMD_COUNTER_FREQ) - 1;  // 167
     else
@@ -583,6 +594,12 @@ HAL_StatusTypeDef SMD_PWM_SetFreqGradient(SMD_Channel ch, uint32_t target_freq, 
     m->v_n     = (float)target_freq;
     m->acc_max = (float)accel;  // 本次运动的加速度上限，不影响用户写入的 SMD_ACC_DATA
 
+    /* 无需在此生成更新事件：ARR 影子寄存器里不可能再有超长周期——
+     * main.c 初始化时已把 20ms 占位周期（Init.Period=19999）锁入影子寄存器
+     * （HAL_TIM_PWM_Init 内部生成更新事件），且 SMD_Calc_PSC_ARR 把硬件
+     * 周期钳位在 ≤20ms（最低 50Hz）。因此任何一次启动后，第一个更新事件
+     * 最迟 20ms 到来，S曲线随后写入的新 ARR 随即生效。运行中不产生 UG，
+     * 避免周期中途强制更新产生毛刺（与旧板注释的做法一致）。 */
     if (target_freq > SMD_PWM_FREQ_MIN) SMD_PWM_Start(ch);
     m->is_running = 1;
 
