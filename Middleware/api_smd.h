@@ -94,6 +94,16 @@ extern "C" {
 #define SERVO_TIM_CNT_HZ        SMD_COUNTER_FREQ            /* 计数频率 1MHz（复用SMD参数） */
 #define SERVO_PWM_PSC           (84000000u / SERVO_TIM_CNT_HZ - 1u)  /* 83：TIM2挂APB1 84MHz */
 #define SERVO_PWM_ARR           (SERVO_TIM_CNT_HZ / SERVO_PWM_FREQ_HZ - 1u) /* 19999：20ms周期 */
+/* 舵机信号反相开关：1 = PA1 经反相光耦（TLP2362，LED亮→输出低，输出侧上拉到5V）
+ * 再到舵机信号线，MCU 引脚须输出反相波形（低电平宽度=0.5~2.5ms），经光耦再反一次
+ * 后舵机端才是正脉冲；0 = PA1 直连舵机信号线（旧接法），MCU 直接输出正脉冲 */
+#define SERVO_PWM_INVERT        1
+/* 【临时测试】舵机自动往复开关：1 = 上电后无需上位机指令，舵机端脉宽自动在
+ * 0.5ms(0°)~2.5ms(180°) 之间匀速来回扫（单程 SERVO_AUTO_SWEEP_HALF_MS），
+ * 此时 Modbus 的启动/停止指令对舵机无效；急停按钮按下时暂停。
+ * 测试完务必改回 0，恢复正常的 初始角→a→b→初始角 流程 */
+#define SERVO_AUTO_SWEEP_TEST       1
+#define SERVO_AUTO_SWEEP_HALF_MS    2000u    /* 单程（0°→180° 或 180°→0°）耗时 ms */
 #define SERVO_ANGLE_MAX         360u         /* 寄存器允许写入的角度上限 */
 #define SERVO_ANGLE_PWM_MAX     180u         /* 脉宽映射上限（与上位机 clampAngle 一致） */
 #define SERVO_DEFAULT_INIT_ANGLE   120u      /* 默认：初始角度 */

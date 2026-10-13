@@ -337,7 +337,9 @@ HAL_StatusTypeDef SMD_PWM_Stop(SMD_Channel ch)
  *         180°=2.5ms、90°=1.5ms 中位。PWM1+OCPolarity HIGH 下 CCR 即高电平
  *         计数：CCR = 500 + 角度×1000/90（计数频率 1MHz，PSC=83）。
  *         注意：上位机 servoworker 的 sysfs PWM 写 100%-logicDuty 是因为它的
- *         输出经外部驱动级反相，本板 PU 直连舵机，必须正极性输出。
+ *         输出经外部驱动级反相，舵机端必须是正脉冲。
+ *         SERVO_PWM_INVERT=1 时 PA1 与舵机之间串了反相光耦，引脚输出
+ *         反相波形（CCR = 20000 - 脉宽），舵机端仍是上述正脉冲。
  *         超过180°按180°输出（与上位机 clampAngle 0~180 一致），因此寄存器
  *         虽接受0~360，实际输出封顶180°。
  */
@@ -346,8 +348,16 @@ static uint32_t Servo_AngleToCCR(float angle_deg)
     if (angle_deg < 0.0f) angle_deg = 0.0f;
     if (angle_deg > (float)SERVO_ANGLE_PWM_MAX) angle_deg = (float)SERVO_ANGLE_PWM_MAX;
 
-    /* 高电平脉宽计数：0°=500(0.5ms) ~ 180°=2500(2.5ms) */
-    return 500u + (uint32_t)(angle_deg * 1000.0f / 90.0f + 0.5f);
+    /* 舵机端正脉冲宽度计数：0°=500(0.5ms) ~ 180°=2500(2.5ms) */
+    const uint32_t pulse = 500u + (uint32_t)(angle_deg * 1000.0f / 90.0f + 0.5f);
+
+#if SERVO_PWM_INVERT
+    /* 经反相光耦输出：PWM1 下 CNT<CCR 为高，CCR=周期-脉宽 使引脚在每周期
+     * 末尾输出 pulse 个计数的低电平，光耦反相后舵机端即为 pulse 宽的正脉冲 */
+    return (SERVO_PWM_ARR + 1u) - pulse;
+#else
+    return pulse;
+#endif
 }
 
 /**
@@ -479,6 +489,16 @@ void SMD_Servo_AbortHold(void)
  */
 void SMD_Servo_Tick(void)
 {
+#if SERVO_AUTO_SWEEP_TEST
+    /* 【临时测试】自动往复：三角波，0°→180°→0° 匀速来回，覆盖正常流程 */
+    static uint32_t sweep_ms = 0;
+    if (!IN_READ(Incom_Estop)) return;   /* 急停按下：暂停在当前角度 */
+
+    sweep_ms = (sweep_ms + 1u) % (2u * SERVO_AUTO_SWEEP_HALF_MS);
+    const uint32_t up_ms = (sweep_ms <= SERVO_AUTO_SWEEP_HALF_MS)
+                         ? sweep_ms : (2u * SERVO_AUTO_SWEEP_HALF_MS - sweep_ms);
+    Servo_WriteAngle((float)SERVO_ANGLE_PWM_MAX * (float)up_ms / (float)SERVO_AUTO_SWEEP_HALF_MS);
+#else
     if (g_servo_state != SERVO_A_TO_B) return;
 
     if (g_servo_elapsed_ms >= g_servo_duration_ms)
@@ -493,6 +513,7 @@ void SMD_Servo_Tick(void)
     const float ratio = (float)g_servo_elapsed_ms / (float)g_servo_duration_ms;
     Servo_WriteAngle(g_servo_start_angle +
                      (g_servo_target_angle - g_servo_start_angle) * ratio);
+#endif /* SERVO_AUTO_SWEEP_TEST */
 }
 
 /* 配置参数设置/获取（设置时立即写入EEPROM保存，供下次开机使用） */
