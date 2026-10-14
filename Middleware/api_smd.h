@@ -78,7 +78,7 @@ extern "C" {
  *                        开机默认5500ms；与 STEP(54) 地址相连，上位机用一帧
  *                        连写 {时长, 1} 即"先设时长再启动"
  *          +4 STEP (54)：一次性启动触发：写1执行一次 初始角→a（快速跳变）→
- *                        a到b（按行程时长线性插值）→初始角（快速跳变）
+ *                        a到b（按行程时长线性插值）→在b停留 SERVO_HOLD_AT_B_MS →初始角（快速跳变）
  *          +5 PU (55)  ：回读当前实际角度；写入=手动直接跳到该角度（0~180，
  *                        中止运行中的流程，不保存EEPROM，供上位机标定角度用）
  *          +6 SP (56)  ：控制口：写1=启动（同STEP=1），写0=停止自动化流程并
@@ -113,6 +113,7 @@ extern "C" {
 #define SERVO_DEFAULT_ANGLE_A      120u      /* 默认：角度a */
 #define SERVO_DEFAULT_ANGLE_B      50u       /* 默认：角度b */
 #define SERVO_DEFAULT_DURATION_MS   5500u    /* 默认：行程时长ms */
+#define SERVO_HOLD_AT_B_MS      1000u        /* 到达角度b后停留ms，再跳回初始角 */
 #endif
 
 /* 步数控制刹车参数 */
@@ -229,7 +230,7 @@ void SMD_Servo_Tick(void);
 
 /**
   * @brief  启动一次完整流程：初始角→a（快速跳变）→a到b（按行程时长线性
-  *         插值）→初始角（快速跳变）。流程运行中调用会被忽略（由 mb_hook.c
+  *         插值）→在b停留 SERVO_HOLD_AT_B_MS →初始角（快速跳变）。流程运行中调用会被忽略（由 mb_hook.c
   *         的触发条件保证，需先 SP=0 停止后才能重新触发）。
   */
 void SMD_Servo_StartSequence(void);

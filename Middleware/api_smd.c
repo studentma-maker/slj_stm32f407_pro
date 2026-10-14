@@ -73,16 +73,19 @@ static ServoCfg_t g_servo_cfg = {
     SERVO_DEFAULT_ANGLE_B,    SERVO_DEFAULT_DURATION_MS
 };
 
-/* 运动状态：IDLE=空闲保持当前角度；A_TO_B=按行程时长线性插值 a→b */
+/* 运动状态：IDLE=空闲保持当前角度；A_TO_B=按行程时长线性插值 a→b；
+ * HOLD_B=到达b后停留 SERVO_HOLD_AT_B_MS 再跳回初始角 */
 typedef enum
 {
     SERVO_IDLE = 0,
-    SERVO_A_TO_B = 1
+    SERVO_A_TO_B = 1,
+    SERVO_HOLD_B = 2
 } ServoState_t;
 
 static ServoState_t g_servo_state       = SERVO_IDLE;
 static uint32_t     g_servo_elapsed_ms  = 0;     /* 本次插值已运行 ms */
 static uint32_t     g_servo_duration_ms = 0;     /* 本次插值时长快照 */
+static uint32_t     g_servo_hold_ms     = 0;     /* 在b已停留 ms */
 static float        g_servo_start_angle = 0.0f;  /* 本次插值起点快照 */
 static float        g_servo_target_angle = 0.0f; /* 本次插值终点快照 */
 static float        g_servo_cur_angle   = 0.0f;  /* 当前输出角度（未限幅） */
@@ -447,7 +450,8 @@ void SMD_Servo_Init(void)
 }
 
 /**
- * @brief  启动一次完整流程：初始角→a（快速跳变）→a到b（线性插值）→初始角（快速跳变）
+ * @brief  启动一次完整流程：初始角→a（快速跳变）→a到b（线性插值）→在b停留
+ *         SERVO_HOLD_AT_B_MS →初始角（快速跳变）
  * @note   触发条件（mb_hook.c）保证仅空闲时调用，运行中重复触发会被忽略，
  *         避免周期重发的触发帧让舵机反复跳回角度a。插值参数（角度a/b/时长）
  *         在启动时快照，运行期间写入的新配置参数不影响本次流程，下次触发生效
@@ -494,9 +498,10 @@ void SMD_Servo_JumpToAngle(uint16_t angle)
 }
 
 /**
- * @brief  舵机 1ms 调度（TIM10 中断）：推进 a→b 线性插值
+ * @brief  舵机 1ms 调度（TIM10 中断）：推进 a→b 线性插值及到达b后的停留计时
  * @note   线性插值与上位机 servoworker 一致（上位机 tick 5ms，此处 1ms 更细）。
- *         行程时长=0 时首个 tick 直接结束（跳回初始角）
+ *         行程时长=0 时首个 tick 直接跳到b并开始停留；停留期间仍算运行中
+ *         （重复启动被忽略），写SP=0/急停/手动跳角度可提前中止
  */
 void SMD_Servo_Tick(void)
 {
@@ -510,13 +515,25 @@ void SMD_Servo_Tick(void)
                          ? sweep_ms : (2u * SERVO_AUTO_SWEEP_HALF_MS - sweep_ms);
     Servo_WriteAngle((float)SERVO_ANGLE_PWM_MAX * (float)up_ms / (float)SERVO_AUTO_SWEEP_HALF_MS);
 #else
+    if (g_servo_state == SERVO_HOLD_B)
+    {
+        /* 在b停留计时到：快速回到初始角度，结束本次流程 */
+        if (++g_servo_hold_ms >= SERVO_HOLD_AT_B_MS)
+        {
+            g_servo_state = SERVO_IDLE;
+            Servo_WriteAngle((float)g_servo_cfg.initial_angle);
+        }
+        return;
+    }
+
     if (g_servo_state != SERVO_A_TO_B) return;
 
     if (g_servo_elapsed_ms >= g_servo_duration_ms)
     {
-        /* a→b 完成：快速回到初始角度，结束本次流程 */
-        g_servo_state = SERVO_IDLE;
-        Servo_WriteAngle((float)g_servo_cfg.initial_angle);
+        /* a→b 完成：确保停在b，开始停留计时 */
+        Servo_WriteAngle(g_servo_target_angle);
+        g_servo_hold_ms = 0;
+        g_servo_state   = SERVO_HOLD_B;
         return;
     }
 
