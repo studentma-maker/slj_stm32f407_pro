@@ -207,13 +207,13 @@ enum Incom_ID {
     Incom_11 ,
     Incom_CartPresent = Incom_11,        // 料车到位/固定检测（本体传感器，非推杆限位，本文件未使用）
     Incom_12 ,
-    Incom_LineBroken1 = Incom_12,        // 断线检测 1（本文件未使用，仅上位机读取）
+    Incom_LineBroken_1_1 = Incom_12,     // 断线检测：1号缝纫机 第1根线（本文件未使用，仅上位机读取）
     Incom_13 ,
-    Incom_LineBroken2 = Incom_13,
+    Incom_LineBroken_1_2 = Incom_13,     // 断线检测：1号缝纫机 第2根线
     Incom_14 ,
-    Incom_LineBroken3 = Incom_14,
+    Incom_LineBroken_2 = Incom_14,       // 断线检测：2号缝纫机
     Incom_15 ,
-    Incom_LineBroken4 = Incom_15,
+    Incom_LineBroken_3 = Incom_15,       // 断线检测：3号缝纫机
     Incom_16 ,
     Incom_Ch3 = Incom_16,                // 缝纫：物料尾部检测（本文件未使用，仅上位机读取）
     Incom_17 ,
