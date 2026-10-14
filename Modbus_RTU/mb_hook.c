@@ -356,6 +356,10 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
                 /* 急停：硬件停止，清除运动状态 */
                 SMD_PWM_Stop((SMD_Channel)ch);
                 SMD_PU_DATA[ch] = SMD_PWM_FREQ_MIN;
+                /* 寄存器镜像的 PU 同步置 1：否则镜像仍是停止前的频率，下一帧任意写入
+                 * 时下方"PU写入"判断发现镜像 != SMD_PU_DATA，会按旧频率把电机重新拉起
+                 * （停止帧与下一写帧之间没有轮询读刷新镜像时必现） */
+                _mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = SMD_PWM_FREQ_MIN;
                 smd_freq_gradient[ch].v_c              = 0.0f;
                 smd_freq_gradient[ch].v_n              = 0.0f;
                 smd_freq_gradient[ch].a_c              = 0.0f;
@@ -386,6 +390,7 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
         {
             SMD_PWM_Stop((SMD_Channel)ch);
             SMD_PU_DATA[ch] = SMD_PWM_FREQ_MIN;
+            _mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = SMD_PWM_FREQ_MIN;  /* 同 SP=0：镜像 PU 同步置 1 */
             smd_freq_gradient[ch].v_c              = 0.0f;
             smd_freq_gradient[ch].v_n              = 0.0f;
             smd_freq_gradient[ch].a_c              = 0.0f;
