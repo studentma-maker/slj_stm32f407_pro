@@ -129,8 +129,8 @@ void mbs_hook_updata_holding(mbs *_mbs)
 #if M6TOSERVO_ENABLE
         /* 舵机通道（M6TOSERVO_ENABLE=1 时物理6号接口=舵机，寄存器语义见
          * api_smd.h 的 M6TOSERVO_ENABLE 说明）：
-         * AM=初始角度 / DR=角度a / ACC=角度b / JRK=行程时长ms（EEPROM持久化参数）；
-         * STEP=一次性启动触发（只写，回读恒0）；PU=只读当前实际角度；
+         * AM=初始角度 / DR=角度a / ACC=角度b（EEPROM持久化）/ JRK=行程时长ms（仅内存）；
+         * STEP=一次性启动触发（只写，回读恒0）；PU=回读当前实际角度（写入=手动跳到该角度）；
          * SP=控制口，回读 1=流程运行中 / 0=空闲 */
         if (ch == SERVO_CH)
         {
@@ -197,8 +197,8 @@ void mbs_hook_updata_holding(mbs *_mbs)
   *  SP   ：写 0=急停；写 N>1=直接跳变到 N Hz
   *  例外（M6TOSERVO_ENABLE=1 时槽位6为舵机，全部寄存器语义重定义，
   *  详见 api_smd.h 的 M6TOSERVO_ENABLE 说明）：AM=初始角度、DR=角度a、
-  *  ACC=角度b、JRK=行程时长ms（以上写入即保存EEPROM）、STEP=写1启动一次
-  *  流程、SP=写1启动/写0停止并回初始角、PU=只读回读当前角度
+  *  ACC=角度b（以上写入即保存EEPROM）、JRK=行程时长ms（不保存）、STEP=写1启动一次
+  *  流程、SP=写1启动/写0停止并回初始角、PU=回读当前角度/写入手动跳到该角度
   *  OUT13/14/15/16：兼容旧板"继电器料车电机"协议，13/14为主继电器对、
   *                   15/16为其冗余复制，四者统一解码后同步驱动 M1+M2
   *                   （M1/M2 是同一台电机的双路冗余接线，详见
@@ -232,12 +232,12 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
 #if M6TOSERVO_ENABLE
         /* 舵机槽位寄存器（语义详见 api_smd.h 的 M6TOSERVO_ENABLE 说明）：
          * AM=初始角度 / DR=角度a / ACC=角度b / JRK=行程时长ms：
-         *   写入即限幅并保存EEPROM（运行中的流程不受影响，下次触发/
+         *   角度写入即限幅并保存EEPROM，行程时长仅内存生效不保存（运行中的流程不受影响，下次触发/
          *   SP=0回初始角时使用新参数），回写限幅后的实际值；
          * STEP：写1启动一次流程（仅空闲时触发，运行中写1忽略，
          *        避免周期重发的触发帧反复重启流程）；
          * SP  ：写1=启动（同STEP），写0=停止自动化流程并回到初始角；
-         * PU  ：只读，写入忽略；
+         * PU  ：写入=手动直接跳到该角度（中止流程，不保存EEPROM）；
          * "全部步进电机急停"寄存器：中止流程并保持当前角度 */
         if (ch == SERVO_CH)
         {
@@ -274,6 +274,10 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
                 const uint16_t sp = _mbs->regHoldingBuf[SMD_SLOT_SP_ADDR(slot)];
                 if (sp == 1 && !SMD_Servo_IsRunning()) SMD_Servo_StartSequence();
                 else if (sp == 0)                     SMD_Servo_StopReturnInitial();
+            }
+            else if (_reg == SMD_SLOT_PU_ADDR(slot))
+            {
+                SMD_Servo_JumpToAngle(_mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)]);
             }
             else if (_reg == STOP_ALL_MOTOR_ADDR && _mbs->regHoldingBuf[STOP_ALL_MOTOR_ADDR] == 1)
             {

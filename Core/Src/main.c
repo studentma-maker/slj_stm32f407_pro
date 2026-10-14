@@ -137,7 +137,7 @@ int main(void)
     API_MOTOR_Init(&htim4, 5000);
 #if M6TOSERVO_ENABLE
     /* 舵机初始化：TIM2_CH2 配 50Hz 基时，从EEPROM载入参数
-     * （全0/全0xFF时写默认值 120/120/50/5500ms），并按初始角度直接
+     * （全0/全0xFF时写默认角度 120/120/50；行程时长不存EEPROM，开机默认5500ms），并按初始角度直接
      * 输出 PWM；DR6 拉低作舵机地线（EN6 已硬件飞线接地） */
     SMD_Servo_Init();
 #endif

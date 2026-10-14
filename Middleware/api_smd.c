@@ -399,16 +399,18 @@ static void Servo_LoadParams(void)
     g_servo_cfg.initial_angle = (buf[0] > SERVO_ANGLE_MAX) ? SERVO_ANGLE_MAX : buf[0];
     g_servo_cfg.angle_a       = (buf[1] > SERVO_ANGLE_MAX) ? SERVO_ANGLE_MAX : buf[1];
     g_servo_cfg.angle_b       = (buf[2] > SERVO_ANGLE_MAX) ? SERVO_ANGLE_MAX : buf[2];
-    g_servo_cfg.duration_ms   = buf[3];
+    /* 行程时长不持久化：开机取默认值，由上位机每次启动前随启动帧下发；
+     * EEPROM 第4个字保留不用（维持原4×uint16布局，兼容已写入的旧数据） */
+    g_servo_cfg.duration_ms   = SERVO_DEFAULT_DURATION_MS;
 }
 
 /**
- * @brief  配置参数写入 EEPROM（AM/DR/ACC/JRK 寄存器写入时调用）
+ * @brief  配置参数写入 EEPROM（AM/DR/ACC 寄存器写入时调用；第4个字保留）
  */
 static void Servo_SaveParams(void)
 {
     const uint16_t buf[4] = { g_servo_cfg.initial_angle, g_servo_cfg.angle_a,
-                              g_servo_cfg.angle_b,       g_servo_cfg.duration_ms };
+                              g_servo_cfg.angle_b,       SERVO_DEFAULT_DURATION_MS };
     EEPROM_WriteData(AT24Cxx_SERVO_PARAMS_ADDR, (uint8_t *)buf, sizeof(buf));
 }
 
@@ -483,6 +485,15 @@ void SMD_Servo_AbortHold(void)
 }
 
 /**
+ * @brief  手动直接跳到指定角度：中止自动化流程，不保存EEPROM
+ */
+void SMD_Servo_JumpToAngle(uint16_t angle)
+{
+    g_servo_state = SERVO_IDLE;
+    Servo_WriteAngle((float)angle);
+}
+
+/**
  * @brief  舵机 1ms 调度（TIM10 中断）：推进 a→b 线性插值
  * @note   线性插值与上位机 servoworker 一致（上位机 tick 5ms，此处 1ms 更细）。
  *         行程时长=0 时首个 tick 直接结束（跳回初始角）
@@ -516,7 +527,7 @@ void SMD_Servo_Tick(void)
 #endif /* SERVO_AUTO_SWEEP_TEST */
 }
 
-/* 配置参数设置/获取（设置时立即写入EEPROM保存，供下次开机使用） */
+/* 配置参数设置/获取（角度设置时立即写入EEPROM保存，供下次开机使用；行程时长不保存） */
 void SMD_Servo_SetInitialAngle(uint16_t angle)
 {
     if (angle > SERVO_ANGLE_MAX) angle = SERVO_ANGLE_MAX;
@@ -549,11 +560,9 @@ void SMD_Servo_SetAngleB(uint16_t angle)
 
 void SMD_Servo_SetDurationMs(uint16_t ms)
 {
-    if (g_servo_cfg.duration_ms != ms)
-    {
-        g_servo_cfg.duration_ms = ms;
-        Servo_SaveParams();
-    }
+    /* 仅内存生效，不写EEPROM：时长由上位机按尾段剩余时间实时计算，每次都可能
+     * 不同，持久化会磨损EEPROM并拖慢本帧应答 */
+    g_servo_cfg.duration_ms = ms;
 }
 
 uint16_t SMD_Servo_GetInitialAngle(void) { return g_servo_cfg.initial_angle; }

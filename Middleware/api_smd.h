@@ -74,16 +74,19 @@ extern "C" {
  *          +0 AM (50)  ：初始角度（0~360，输出限幅0~180），写入即保存EEPROM
  *          +1 DR (51)  ：角度a，写入即保存EEPROM（DR6引脚始终拉低作舵机地线）
  *          +2 ACC (52) ：角度b，写入即保存EEPROM
- *          +3 JRK (53) ：行程时长ms（a→b耗时，上限65535），写入即保存EEPROM
+ *          +3 JRK (53) ：行程时长ms（a→b耗时，上限65535），仅内存生效不保存EEPROM，
+ *                        开机默认5500ms；与 STEP(54) 地址相连，上位机用一帧
+ *                        连写 {时长, 1} 即"先设时长再启动"
  *          +4 STEP (54)：一次性启动触发：写1执行一次 初始角→a（快速跳变）→
  *                        a到b（按行程时长线性插值）→初始角（快速跳变）
- *          +5 PU (55)  ：只读，回读当前实际角度
+ *          +5 PU (55)  ：回读当前实际角度；写入=手动直接跳到该角度（0~180，
+ *                        中止运行中的流程，不保存EEPROM，供上位机标定角度用）
  *          +6 SP (56)  ：控制口：写1=启动（同STEP=1），写0=停止自动化流程并
  *                        回到初始角；回读 1=流程运行中 / 0=空闲
  *        角度-脉宽映射与旧板 slj_stm32f407 舵机测试一致（正极性输出）：
  *        0°=0.5ms、180°=2.5ms 高电平脉宽，超过180°按180°输出。
  *        开机从EEPROM读参数（全0/全0xFF视为未初始化→写默认值：
- *        初始角120/角度a 120/角度b 50/行程时长5500ms），并直接输出初始角度PWM。
+ *        初始角120/角度a 120/角度b 50），并直接输出初始角度PWM。
  *        0 = 维持原步进电机控制逻辑，与改动前完全一致。
  */
 #define M6TOSERVO_ENABLE        1
@@ -102,7 +105,7 @@ extern "C" {
  * 0.5ms(0°)~2.5ms(180°) 之间匀速来回扫（单程 SERVO_AUTO_SWEEP_HALF_MS），
  * 此时 Modbus 的启动/停止指令对舵机无效；急停按钮按下时暂停。
  * 测试完务必改回 0，恢复正常的 初始角→a→b→初始角 流程 */
-#define SERVO_AUTO_SWEEP_TEST       1
+#define SERVO_AUTO_SWEEP_TEST       0
 #define SERVO_AUTO_SWEEP_HALF_MS    2000u    /* 单程（0°→180° 或 180°→0°）耗时 ms */
 #define SERVO_ANGLE_MAX         360u         /* 寄存器允许写入的角度上限 */
 #define SERVO_ANGLE_PWM_MAX     180u         /* 脉宽映射上限（与上位机 clampAngle 一致） */
@@ -243,7 +246,8 @@ void SMD_Servo_StopReturnInitial(void);
 void SMD_Servo_AbortHold(void);
 
 /**
-  * @brief  设置/获取配置参数（设置函数内部限幅并立即写入EEPROM保存）
+  * @brief  设置/获取配置参数（角度设置函数内部限幅并立即写入EEPROM保存；
+  *         行程时长仅内存生效，不保存）
   * @param  angle  角度值（0~360，超过按360；输出时按0~180限幅映射脉宽）
   * @param  ms     行程时长（a→b耗时，毫秒）
   */
@@ -255,6 +259,12 @@ uint16_t SMD_Servo_GetInitialAngle(void);
 uint16_t SMD_Servo_GetAngleA(void);
 uint16_t SMD_Servo_GetAngleB(void);
 uint16_t SMD_Servo_GetDurationMs(void);
+
+/**
+  * @brief  手动直接跳到指定角度（PU寄存器写入用）
+  * @note   中止运行中的自动化流程，角度按0~180限幅，不保存EEPROM
+  */
+void SMD_Servo_JumpToAngle(uint16_t angle);
 
 /**
   * @brief  获取舵机当前实际角度（已按0~180限幅，PU寄存器回读用）
