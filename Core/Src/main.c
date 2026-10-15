@@ -132,6 +132,7 @@ int main(void)
     htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE; htim14.Init.Period = 19999; HAL_TIM_PWM_Init(&htim14);
     Delay_Init();
     EEPROM_Init();
+    SMD_Belt_Init();   /* 排发皮带一圈步数（EEPROM）+ ch4 初始电平 */
     mbh_init(&mbhMCU);
     mbs_init(&mbsUSB);
     API_MOTOR_Init(&htim4, 5000);
@@ -175,6 +176,7 @@ int main(void)
         /* USER CODE BEGIN 3 */
         mbh_poll(&mbhMCU);
         mbs_poll(&mbsUSB);
+        SMD_Belt_SaveIfPending();   /* 皮带标定成功后写 EEPROM（I2C 不放在中断里） */
     }
 
     /* USER CODE END 3 */

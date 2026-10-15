@@ -24,6 +24,7 @@
 #include "tim.h"
 #include "api_motor_control.h"
 #include "api_eeprom.h"
+#include "mb_hook.h"
 #include <math.h>
 
 /* ========================= 硬件定时器映射表 ========================= */
@@ -718,7 +719,8 @@ int32_t SMD_CalcAccNeedSteps(float v_current, float a_current,
  *           夹爪电机(MOTOR_GripperMove)：Incom_GripperHomeLimit/Incom_GripperGripLimit 双向限位，
  *             Incom_FeedHair 联锁触发、RELAY_1 联锁触发
  *           急停：Incom_Estop，作用于全部通道
- *           升降电机已取消（原 Incom_LiftLimit 输入仅作回读，不再参与限位逻辑）；
+ *           升降电机已取消（原 Incom_LiftLimit 输入已改作 Incom_Ch4 排发皮带零点标记，
+ *             仅上位机读取，不参与限位逻辑）；
  *           舵机通道（SERVO_CH）不进入本函数（见 TIM10 中断调度）
  */
 static uint8_t SMD_IsLimited(int ch, uint8_t cur_dir, SMD_Freq_Gradient *m)
@@ -1116,6 +1118,137 @@ static void SMD_ProcessChannel(SMD_Channel ch)
  * }
  */
 
+/* ========================= 排发皮带零点 / 一圈步数（ch4 黑点） ========================= */
+#define BELT_CH4_DEBOUNCE_MS      3u   /* ch4 电平连续保持 3ms 才算翻转；边沿脉冲取第一次变化那一 ms */
+#define BELT_CALIB_TIMEOUT_REVS   3u   /* 标定走了 3 圈仍未见两次上升沿：停皮带放弃（ch4 未接/脏污） */
+
+typedef enum { BELT_CALIB_IDLE = 0, BELT_CALIB_WAIT_FIRST, BELT_CALIB_WAIT_SECOND } BeltCalibState;
+
+static volatile uint32_t s_beltCycleSteps   = BELT_CYCLE_STEPS_DEFAULT;   /* 一圈步数 */
+static volatile uint32_t s_beltZeroPulse    = 0;    /* 最近一次 ch4 上升沿时的皮带脉冲总数 */
+static volatile uint8_t  s_beltZeroValid    = 0;    /* 开机后是否已经过黑点 */
+static uint8_t           s_ch4Stable        = 0;    /* ch4 消抖后电平 */
+static uint8_t           s_ch4Cnt           = 0;    /* 与稳定电平不同的连续 ms 数 */
+static uint32_t          s_ch4EdgePulse     = 0;    /* 本次电平变化第一 ms 的脉冲总数 */
+static volatile uint8_t  s_beltCalibState   = BELT_CALIB_IDLE;
+static uint32_t          s_beltCalibStart   = 0;    /* 进入标定时的脉冲总数（超时判定） */
+static uint32_t          s_beltCalibFirst   = 0;    /* 标定第一次上升沿的脉冲总数 */
+static volatile uint8_t  s_beltSavePending  = 0;
+
+void SMD_Belt_Init(void)
+{
+    uint32_t steps = 0;
+    EEPROM_ReadData(AT24Cxx_BELT_CYCLE_ADDR, (uint8_t *)&steps, 4);
+    s_beltCycleSteps = (steps == 0u || steps == 0xFFFFFFFFu) ? BELT_CYCLE_STEPS_DEFAULT : steps;
+    /* 以开机时电平为初始稳定值：上电时黑点正好在光电下，不能当成一次上升沿 */
+    s_ch4Stable = IN_READ(Incom_Ch4) ? 1u : 0u;
+}
+
+uint8_t SMD_Belt_CalibStart(void)
+{
+    const SMD_Channel ch = MOTOR_PaiFa;
+    if (s_beltCalibState != BELT_CALIB_IDLE || SMD_PWM_IsOutputOn(ch)) return 0;
+    s_beltCalibStart = MotorPulseTotal[ch];
+    s_beltCalibState = BELT_CALIB_WAIT_FIRST;
+
+    /* 皮带已停：直接设方向并按 S 曲线升到标定频率（不依赖寄存器镜像差异触发，
+     * 镜像由调用方 mb_hook 同步为同样的 DR/PU，槽位循环不会再动它） */
+    smd_freq_gradient[ch].dir_change = 0;
+    smd_freq_gradient[ch].dir_state  = SMD_DIR_NORMAL;
+    SMD_DR(ch, BELT_CALIB_DR);
+    SMD_PU_DATA[ch] = BELT_CALIB_FREQ;
+    SMD_PWM_SetFreqGradient(ch, BELT_CALIB_FREQ, SMD_ACC_DATA[ch]);
+    return 1;
+}
+
+void SMD_Belt_CalibCancel(void)
+{
+    s_beltCalibState = BELT_CALIB_IDLE;
+}
+
+uint16_t SMD_Belt_GetPosition(void)
+{
+    const uint32_t cycle = s_beltCycleSteps;
+    if (!s_beltZeroValid || cycle == 0u) return BELT_POSITION_INVALID;
+    const uint32_t cur = MotorPulseTotal[MOTOR_PaiFa] - s_beltZeroPulse;   /* 无符号取模，回绕无妨 */
+    const uint32_t q   = (uint32_t)(((uint64_t)cur << 16) / cycle);
+    return (q >= BELT_POSITION_INVALID) ? BELT_POSITION_INVALID : (uint16_t)q;
+}
+
+void SMD_Belt_SaveIfPending(void)
+{
+    if (!s_beltSavePending) return;
+    s_beltSavePending = 0;
+    uint32_t steps = s_beltCycleSteps;
+    EEPROM_WriteData(AT24Cxx_BELT_CYCLE_ADDR, (uint8_t *)&steps, 4);
+}
+
+/* 标定结束：直接停皮带（不减速），清运动状态，同 SP=0 急停；寄存器镜像由 mb_hook 同步 */
+static void SMD_Belt_StopNow(void)
+{
+    const SMD_Channel ch = MOTOR_PaiFa;
+    SMD_PWM_Stop(ch);
+    SMD_PU_DATA[ch]                        = SMD_PWM_FREQ_MIN;
+    smd_freq_gradient[ch].v_c              = 0.0f;
+    smd_freq_gradient[ch].v_n              = 0.0f;
+    smd_freq_gradient[ch].a_c              = 0.0f;
+    smd_freq_gradient[ch].current_freq_int = SMD_PWM_FREQ_MIN;
+    smd_freq_gradient[ch].is_running       = 0;
+    smd_freq_gradient[ch].dir_change       = 0;
+    smd_freq_gradient[ch].dir_state        = SMD_DIR_NORMAL;
+    mbs_hook_belt_stopped();
+}
+
+static void SMD_Belt_OnRise(uint32_t pulse)
+{
+    s_beltZeroPulse = pulse;
+    s_beltZeroValid = 1;
+
+    if (s_beltCalibState == BELT_CALIB_WAIT_FIRST)
+    {
+        s_beltCalibFirst = pulse;
+        s_beltCalibState = BELT_CALIB_WAIT_SECOND;
+    }
+    else if (s_beltCalibState == BELT_CALIB_WAIT_SECOND)
+    {
+        const uint32_t steps = pulse - s_beltCalibFirst;
+        s_beltCalibState = BELT_CALIB_IDLE;
+        SMD_Belt_StopNow();
+        if (steps > 0u)
+        {
+            s_beltCycleSteps  = steps;
+            s_beltSavePending = 1;
+        }
+    }
+}
+
+/* 每 1ms：ch4 消抖 + 上升沿置零点 + 标定超时（须在 SMD_PulseCountTick 之后调用） */
+static void SMD_Belt_Tick(void)
+{
+    const uint8_t raw = IN_READ(Incom_Ch4) ? 1u : 0u;
+    if (raw != s_ch4Stable)
+    {
+        if (s_ch4Cnt == 0u) s_ch4EdgePulse = MotorPulseTotal[MOTOR_PaiFa];
+        if (++s_ch4Cnt >= BELT_CH4_DEBOUNCE_MS)
+        {
+            s_ch4Stable = raw;
+            s_ch4Cnt    = 0;
+            if (raw) SMD_Belt_OnRise(s_ch4EdgePulse);
+        }
+    }
+    else
+    {
+        s_ch4Cnt = 0;
+    }
+
+    if (s_beltCalibState != BELT_CALIB_IDLE &&
+        (MotorPulseTotal[MOTOR_PaiFa] - s_beltCalibStart) > BELT_CALIB_TIMEOUT_REVS * s_beltCycleSteps)
+    {
+        s_beltCalibState = BELT_CALIB_IDLE;
+        SMD_Belt_StopNow();
+    }
+}
+
 /* ========================= TIM10 1ms中断服务函数（S曲线调度） ========================= */
 /**
  * @brief  TIM1更新/TIM10全局中断，1ms周期。
@@ -1125,6 +1258,7 @@ static void SMD_ProcessChannel(SMD_Channel ch)
  *   1. 对每个通道调用 SMD_ProcessChannel()（换向/限位检测 + S曲线一步）
  *   2. 对支持步数控制的通道做步数控制决策 SMD_MotorStepsCtl()
  *   2.5 累计各通道输出脉冲总数 SMD_PulseCountTick()（皮带位置，见 SMD_GetPulseTotal）
+ *   2.6 排发皮带零点 SMD_Belt_Tick()：ch4 上升沿置零点、手动标定判定
  *   3. 推进"回原点"状态机 SMD_SysToOrigin()
  *   4. 推杆电机（M1/M2双路冗余）的限位/急停保护 API_MOTOR_CheckLimit()
  *   （OUT11/12继电器料车电机方案已停用，SMD_CheckRelayMotorLimit() 不再调用）
@@ -1155,6 +1289,7 @@ void TIM1_UP_TIM10_IRQHandler(void)
     }
 
     SMD_PulseCountTick();   /* 必须在本 ms 的频率更新之后：按刚设好的 ARR 累计本 ms 输出的脉冲 */
+    SMD_Belt_Tick();        /* 用本 ms 累计后的脉冲总数记 ch4 边沿 */
 
 #if M6TOSERVO_ENABLE
     /* 舵机 a→b 线性插值推进（1ms）；急停按钮触发时中止流程并保持

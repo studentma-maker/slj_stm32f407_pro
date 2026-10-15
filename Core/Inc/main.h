@@ -183,9 +183,9 @@ void Error_Handler(void);
 // 后续如物理接线调换，只需把对应别名改指到新的 Incom_N 即可。
 enum Incom_ID {
     Incom_1 = 0,
-    Incom_LiftLimit = Incom_1,           // 原升降电机上限位/原点限位——升降电机已取消，本输入仅作回读。
-                                         // 下位机 M6TOSERVO_ENABLE=1（api_smd.h）时6号接口为舵机，
-                                         // 步进限位逻辑不再使用本输入
+    Incom_Ch4 = Incom_1,                 // 缝纫：排发皮带零点标记检测（漫反射光电，皮带侧涂黑点到达时为高电平）。
+                                         // 原为升降电机限位(Incom_LiftLimit)，升降电机已取消后改作此用；
+                                         // 本文件未使用，仅上位机读取，不参与任何限位逻辑
     Incom_2 ,
     Incom_FBackRetreatLimit = Incom_2,   // 进退电机回退(维护位)限位，cur_dir=0 方向触发
     Incom_3 ,

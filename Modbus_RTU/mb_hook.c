@@ -179,6 +179,8 @@ void mbs_hook_updata_holding(mbs *_mbs)
     const uint32_t beltPulse = SMD_GetPulseTotal(MOTOR_PaiFa);
     _mbs->regHoldingBuf[BELT_PULSE_HIGH_ADDR] = (uint16_t)(beltPulse >> 16);
     _mbs->regHoldingBuf[BELT_PULSE_LOW_ADDR]  = (uint16_t)(beltPulse & 0xFFFFu);
+    /* 皮带一圈进度：每次应答前现算 */
+    _mbs->regHoldingBuf[BELT_POSITION_ADDR]   = SMD_Belt_GetPosition();
 }
 
 /**
@@ -224,10 +226,35 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
 
     _mbs->regHoldingBuf[_reg] = _val;
 
+    /* --- 皮带一圈步数手动标定：命令寄存器处理后清零；接受后 SMD_Belt_CalibStart 已直接
+     *     启动皮带，这里把排发电机槽位的 DR/PU 镜像同步成同样的值，下方槽位循环不会再改动它 --- */
+    if (_reg == BELT_PULSE_CYCLE_ADDR)
+    {
+        _mbs->regHoldingBuf[BELT_PULSE_CYCLE_ADDR] = 0;
+        if (_val == 1 && SMD_Belt_CalibStart())
+        {
+            for (int slot = 0; slot < SMD_SLOT_COUNT; slot++)
+            {
+                if (smd_slot_phys_ch[slot] != (int8_t)MOTOR_PaiFa) continue;
+                _mbs->regHoldingBuf[SMD_SLOT_DR_ADDR(slot)] = BELT_CALIB_DR;
+                _mbs->regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = BELT_CALIB_FREQ;
+            }
+        }
+    }
+    else if (_reg == STOP_ALL_MOTOR_ADDR && _val == 1)
+    {
+        SMD_Belt_CalibCancel();
+    }
+
     for (int slot = 0; slot < SMD_SLOT_COUNT; slot++)
     {
         int8_t ch = smd_slot_phys_ch[slot];
         if (ch < 0) continue;  /* 该槽位未接线，跳过，不驱动任何硬件 */
+
+        /* 标定期间上位机改写排发电机寄存器：中止标定，皮带按上位机指令执行 */
+        if (ch == (int8_t)MOTOR_PaiFa &&
+            _reg >= SMD_SLOT_REG_BASE(slot) && _reg < SMD_SLOT_REG_BASE(slot) + 10u)
+            SMD_Belt_CalibCancel();
 
 #if M6TOSERVO_ENABLE
         /* 舵机槽位寄存器（语义详见 api_smd.h 的 M6TOSERVO_ENABLE 说明）：
@@ -435,6 +462,15 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
             break;
 
         default: break;
+    }
+}
+
+void mbs_hook_belt_stopped(void)
+{
+    for (int slot = 0; slot < SMD_SLOT_COUNT; slot++)
+    {
+        if (smd_slot_phys_ch[slot] != (int8_t)MOTOR_PaiFa) continue;
+        mbsUSB.regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = SMD_PWM_FREQ_MIN;
     }
 }
 

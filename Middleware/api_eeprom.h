@@ -20,6 +20,11 @@ extern "C" {
  * 24C02 共256字节空间充足。由 api_smd.c 舵机模块（M6TOSERVO_ENABLE=1）读写 */
 #define AT24Cxx_SERVO_PARAMS_ADDR   16
 
+/* 排发皮带一圈步数（uint32，4字节），接在舵机参数(16~23)之后，由 api_smd.c 的
+ * 皮带零点模块读写：开机读取，手动标定（Modbus 198 写1）成功后写入。
+ * 读到 0 或 0xFFFFFFFF（新芯片空白值）按未标定处理，使用默认值 BELT_CYCLE_STEPS_DEFAULT */
+#define AT24Cxx_BELT_CYCLE_ADDR     24
+
 /* 导出函数声明 ------------------------------------------------------------*/
 
 /**

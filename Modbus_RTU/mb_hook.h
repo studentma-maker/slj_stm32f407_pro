@@ -231,6 +231,16 @@
 #define BELT_PULSE_HIGH_ADDR       135
 #define BELT_PULSE_LOW_ADDR        136
 
+/* 皮带一圈进度（只读）：16 位定点数，值/65536 ∈ [0,1)，0xFFFF = 无效
+ * （开机后尚未经过 ch4 黑点 / 超出一圈未见黑点）。每次 ch4 上升沿归零，
+ * 应答轮询前按 (当前脉冲 − 零点脉冲) / 一圈步数 现算，见 api_smd.h 皮带零点说明 */
+#define BELT_POSITION_ADDR         137
+
+/* 皮带一圈步数手动标定（写1触发，处理后自动清零）：仅排发皮带停止时接受，
+ * 皮带以 BELT_CALIB_FREQ、BELT_CALIB_DR 转动，两次 ch4 上升沿后直接停并写 EEPROM；
+ * 标定期间上位机改写排发电机寄存器或写全部急停 → 中止标定 */
+#define BELT_PULSE_CYCLE_ADDR      198
+
 #define STOP_ALL_MOTOR_ADDR        (REG_HOLDING_NREGS - 1) /* 全部步进电机急停（写1触发） */
 
 /* 导出函数声明 ------------------------------------------------------------*/
@@ -242,6 +252,12 @@
   * @param  datalen  接收到的数据长度
   * @retval None
   */
+/**
+  * @brief  皮带标定结束时由 api_smd.c 在中断里调用：把排发电机所在槽位的 PU 寄存器镜像
+  *         同步为 SMD_PWM_FREQ_MIN（同 SP=0），避免下一帧任意写入按旧频率把皮带重新拉起
+  */
+void mbs_hook_belt_stopped(void);
+
 void mbh_hook_rec01(uint8_t add, uint8_t *data, uint8_t datalen);
 void mbh_hook_rec02(uint8_t add, uint8_t *data, uint8_t datalen);
 void mbh_hook_rec03(uint8_t add, uint8_t *data, uint8_t datalen);

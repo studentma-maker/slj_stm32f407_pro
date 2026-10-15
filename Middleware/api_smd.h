@@ -312,6 +312,24 @@ HAL_StatusTypeDef SMD_PWM_SetFreq(SMD_Channel ch, uint32_t freq);
   */
 uint32_t SMD_GetPulseTotal(SMD_Channel ch);
 
+/* ==================== 排发皮带零点 / 一圈步数（ch4 黑点） ====================
+ * 排发皮带侧涂黑点，漫反射光电 ch4（Incom_Ch4，触发=高电平）检测。1ms 中断里消抖
+ * 检测 ch4 上升沿，记下当时的皮带脉冲总数作为零点；皮带进度 = (当前脉冲 − 零点脉冲)
+ * / 一圈步数，以 16 位定点数（值/65536）经 Modbus 137 回读，0xFFFF = 无效。
+ * 一圈步数开机从 EEPROM 读取（未标定用默认值），手动标定（Modbus 198 写1）：
+ * 皮带以 BELT_CALIB_FREQ、dr=0 转动，相邻两次 ch4 上升沿的脉冲差即一圈步数，
+ * 第二次上升沿时直接停皮带（不减速）并写 EEPROM。 */
+#define BELT_CYCLE_STEPS_DEFAULT   227091u   /* 未标定时的一圈步数（2026-10 实测） */
+#define BELT_CALIB_FREQ            1000u     /* 标定时皮带脉冲频率 Hz */
+#define BELT_CALIB_DR              0u        /* 标定时皮带方向（与生产方向一致） */
+#define BELT_POSITION_INVALID      0xFFFFu   /* 137 无效值：开机后尚未经过黑点 / 超出一圈(漏检) */
+
+void     SMD_Belt_Init(void);              /* 开机：EEPROM 读一圈步数 + 取 ch4 初始电平（GPIO/EEPROM 初始化之后调用） */
+uint8_t  SMD_Belt_CalibStart(void);        /* 进入标定并以 BELT_CALIB_FREQ/BELT_CALIB_DR 启动皮带（皮带停止时才接受）；返回1=已接受 */
+void     SMD_Belt_CalibCancel(void);       /* 中止标定（上位机改写排发电机/全部急停时调用），不停电机 */
+uint16_t SMD_Belt_GetPosition(void);       /* 皮带进度定点数（值/65536），无效返回 BELT_POSITION_INVALID */
+void     SMD_Belt_SaveIfPending(void);     /* 主循环调用：标定成功后把一圈步数写 EEPROM（不在中断里做 I2C） */
+
 /**
   * @brief  根据当前速度/加速度反推减速到目标速度所需的步数
   * @note   移植自旧项目 SMD_CalcAccNeedSteps()，用于步数控制的提前刹车决策
