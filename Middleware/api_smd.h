@@ -326,7 +326,7 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch);
 #define BELT_CALIB_DR              0u        /* 标定时皮带方向（与生产方向一致） */
 #define BELT_CALIB_REVS            6u        /* 标定采集圈数（与上位机 SewingWorker 的 BELT_CALIB_REVS 一致） */
 #define BELT_POSITION_INVALID      0xFFFFu   /* 137 无效值：开机后尚未经过黑点 / 超出一圈(漏检) */
-#define BELT_ZERO_FREQ             4000u     /* 开机找零：皮带转动频率 Hz（方向同 BELT_CALIB_DR） */
+#define BELT_ZERO_FREQ             8000u     /* 开机找零：皮带转动频率 Hz（= SMD_PWM_FREQ_MAX，同生产高速；方向同 BELT_CALIB_DR） */
 
 void     SMD_Belt_Init(void);              /* 开机：EEPROM 读一圈步数 + 取 ch4 初始电平（GPIO/EEPROM 初始化之后调用） */
 uint8_t  SMD_Belt_CalibStart(void);        /* 进入标定并以 BELT_CALIB_FREQ/BELT_CALIB_DR 启动皮带（皮带停止时才接受）；返回1=已接受 */
