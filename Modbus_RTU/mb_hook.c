@@ -243,7 +243,7 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
     }
     else if (_reg == STOP_ALL_MOTOR_ADDR && _val == 1)
     {
-        SMD_Belt_CalibCancel();
+        SMD_Belt_AutoCancel();
     }
 
     for (int slot = 0; slot < SMD_SLOT_COUNT; slot++)
@@ -251,10 +251,12 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
         int8_t ch = smd_slot_phys_ch[slot];
         if (ch < 0) continue;  /* 该槽位未接线，跳过，不驱动任何硬件 */
 
-        /* 标定期间上位机改写排发电机寄存器：中止标定，皮带按上位机指令执行 */
+        /* 标定/开机找零期间上位机接管排发电机（写 DR/STEP/PU/SP）：中止下位机的判定，皮带按上位机
+         * 指令执行；只改 ACC/JRK 不算接管（WRITE_HOLDING_V=2 的寄存器在上面已被过滤，不会到这里） */
         if (ch == (int8_t)MOTOR_PaiFa &&
-            _reg >= SMD_SLOT_REG_BASE(slot) && _reg < SMD_SLOT_REG_BASE(slot) + 10u)
-            SMD_Belt_CalibCancel();
+            (_reg == SMD_SLOT_DR_ADDR(slot) || _reg == SMD_SLOT_STEP_ADDR(slot) ||
+             _reg == SMD_SLOT_PU_ADDR(slot) || _reg == SMD_SLOT_SP_ADDR(slot)))
+            SMD_Belt_AutoCancel();
 
 #if M6TOSERVO_ENABLE
         /* 舵机槽位寄存器（语义详见 api_smd.h 的 M6TOSERVO_ENABLE 说明）：
@@ -465,12 +467,13 @@ void mbs_hook_extract_holding(mbs *_mbs, uint16_t _reg, uint16_t _val)
     }
 }
 
-void mbs_hook_belt_stopped(void)
+void mbs_hook_belt_mirror(uint16_t dr, uint16_t pu)
 {
     for (int slot = 0; slot < SMD_SLOT_COUNT; slot++)
     {
         if (smd_slot_phys_ch[slot] != (int8_t)MOTOR_PaiFa) continue;
-        mbsUSB.regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = SMD_PWM_FREQ_MIN;
+        if (dr != BELT_MIRROR_KEEP) mbsUSB.regHoldingBuf[SMD_SLOT_DR_ADDR(slot)] = dr;
+        mbsUSB.regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = pu;
     }
 }
 

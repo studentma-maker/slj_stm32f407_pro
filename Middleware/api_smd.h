@@ -326,10 +326,16 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch);
 #define BELT_CALIB_DR              0u        /* 标定时皮带方向（与生产方向一致） */
 #define BELT_CALIB_REVS            6u        /* 标定采集圈数（与上位机 SewingWorker 的 BELT_CALIB_REVS 一致） */
 #define BELT_POSITION_INVALID      0xFFFFu   /* 137 无效值：开机后尚未经过黑点 / 超出一圈(漏检) */
+#define BELT_ZERO_FREQ             4000u     /* 开机找零：皮带转动频率 Hz（方向同 BELT_CALIB_DR） */
 
 void     SMD_Belt_Init(void);              /* 开机：EEPROM 读一圈步数 + 取 ch4 初始电平（GPIO/EEPROM 初始化之后调用） */
 uint8_t  SMD_Belt_CalibStart(void);        /* 进入标定并以 BELT_CALIB_FREQ/BELT_CALIB_DR 启动皮带（皮带停止时才接受）；返回1=已接受 */
-void     SMD_Belt_CalibCancel(void);       /* 中止标定（上位机改写排发电机/全部急停时调用），不停电机 */
+/* 开机找零：初始化时调用，以 BELT_ZERO_FREQ 转动皮带直到 ch4 上升沿（零点在上升沿当场锁存），
+ * 随后 S 曲线减速停（不硬停，避免高速急停丢步让零点之后的位置偏掉）；走 1.5 圈仍未见黑点则减速停放弃 */
+void     SMD_Belt_SeekZeroStart(void);
+/* 中止下位机自己发起的皮带动作（标定/开机找零）的判定，不停电机：上位机接管排发电机
+ * （写 DR/STEP/PU/SP）或写全部急停时调用 */
+void     SMD_Belt_AutoCancel(void);
 uint16_t SMD_Belt_GetPosition(void);       /* 皮带进度定点数（值/65536），无效返回 BELT_POSITION_INVALID */
 void     SMD_Belt_SaveIfPending(void);     /* 主循环调用：标定成功后把一圈步数写 EEPROM（不在中断里做 I2C） */
 

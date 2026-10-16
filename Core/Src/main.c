@@ -150,6 +150,9 @@ int main(void)
         SMD_PWM_SetFreqGradient((SMD_Channel)ch, SMD_PU_DATA[ch], SMD_ACC_DATA[ch]);
     }
 
+    /* 开机找零：排发皮带以 BELT_ZERO_FREQ 转到 ch4 黑点（零点当场锁存）后减速停，137 皮带进度随即有效 */
+    SMD_Belt_SeekZeroStart();
+
     HAL_TIM_Base_Start_IT(&htim10);
     HAL_TIM_Base_Start_IT(&htim11);
     /* USER CODE END 2 */

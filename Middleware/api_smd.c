@@ -1135,6 +1135,8 @@ static uint32_t          s_beltCalibStart   = 0;    /* 进入标定时的脉冲�
 static uint32_t          s_beltCalibFirst   = 0;    /* 标定第一次上升沿的脉冲总数 */
 static uint8_t           s_beltCalibRevs    = 0;    /* 第一次上升沿之后已数到的整圈数 */
 static volatile uint8_t  s_beltSavePending  = 0;
+static volatile uint8_t  s_beltSeeking      = 0;    /* 开机找零进行中 */
+static uint32_t          s_beltSeekStart    = 0;    /* 开始找零时的脉冲总数（超时判定） */
 
 void SMD_Belt_Init(void)
 {
@@ -1162,9 +1164,25 @@ uint8_t SMD_Belt_CalibStart(void)
     return 1;
 }
 
-void SMD_Belt_CalibCancel(void)
+void SMD_Belt_AutoCancel(void)
 {
     s_beltCalibState = BELT_CALIB_IDLE;
+    s_beltSeeking    = 0;
+}
+
+void SMD_Belt_SeekZeroStart(void)
+{
+    const SMD_Channel ch = MOTOR_PaiFa;
+    if (s_beltSeeking || s_beltCalibState != BELT_CALIB_IDLE || SMD_PWM_IsOutputOn(ch)) return;
+    s_beltSeekStart = MotorPulseTotal[ch];
+    s_beltSeeking   = 1;
+    smd_freq_gradient[ch].dir_change = 0;
+    smd_freq_gradient[ch].dir_state  = SMD_DIR_NORMAL;
+    SMD_DR(ch, BELT_CALIB_DR);
+    SMD_PU_DATA[ch] = BELT_ZERO_FREQ;
+    SMD_PWM_SetFreqGradient(ch, BELT_ZERO_FREQ, SMD_ACC_DATA[ch]);
+    /* 寄存器镜像同步成同样的 DR/PU：之后上位机写别的寄存器时槽位循环不会把皮带改停/改速 */
+    mbs_hook_belt_mirror(BELT_CALIB_DR, BELT_ZERO_FREQ);
 }
 
 uint16_t SMD_Belt_GetPosition(void)
@@ -1197,13 +1215,28 @@ static void SMD_Belt_StopNow(void)
     smd_freq_gradient[ch].is_running       = 0;
     smd_freq_gradient[ch].dir_change       = 0;
     smd_freq_gradient[ch].dir_state        = SMD_DIR_NORMAL;
-    mbs_hook_belt_stopped();
+    mbs_hook_belt_mirror(BELT_MIRROR_KEEP, SMD_PWM_FREQ_MIN);
+}
+
+/* 开机找零结束：S 曲线减速到 SMD_PWM_FREQ_MIN 即停（SMD_RunSCurve 到达后自动关 PWM） */
+static void SMD_Belt_DecelStop(void)
+{
+    const SMD_Channel ch = MOTOR_PaiFa;
+    SMD_PU_DATA[ch] = SMD_PWM_FREQ_MIN;
+    SMD_PWM_SetFreqGradient(ch, SMD_PWM_FREQ_MIN, SMD_ACC_DATA[ch]);
+    mbs_hook_belt_mirror(BELT_MIRROR_KEEP, SMD_PWM_FREQ_MIN);
 }
 
 static void SMD_Belt_OnRise(uint32_t pulse)
 {
     s_beltZeroPulse = pulse;
     s_beltZeroValid = 1;
+
+    if (s_beltSeeking)
+    {
+        s_beltSeeking = 0;
+        SMD_Belt_DecelStop();
+    }
 
     if (s_beltCalibState == BELT_CALIB_WAIT_FIRST)
     {
@@ -1250,6 +1283,19 @@ static void SMD_Belt_Tick(void)
         s_beltCalibState = BELT_CALIB_IDLE;
         SMD_Belt_StopNow();
     }
+
+    /* 开机找零超时：走了 1.5 圈仍未见黑点（ch4 未接/脏污/黑点磨掉），减速停放弃，137 保持无效 */
+    if (s_beltSeeking &&
+        (MotorPulseTotal[MOTOR_PaiFa] - s_beltSeekStart) > s_beltCycleSteps + s_beltCycleSteps / 2u)
+    {
+        s_beltSeeking = 0;
+        SMD_Belt_DecelStop();
+    }
+
+    /* 标定/找零期间皮带被别的原因停掉（急停按钮触发限位停、上位机写停止等）：放弃判定，
+     * 否则之后生产中皮带经过黑点时会被误当成标定/找零完成而停皮带 */
+    if ((s_beltSeeking || s_beltCalibState != BELT_CALIB_IDLE) && !SMD_PWM_IsOutputOn(MOTOR_PaiFa))
+        SMD_Belt_AutoCancel();
 }
 
 /* ========================= TIM10 1ms中断服务函数（S曲线调度） ========================= */

@@ -254,10 +254,14 @@
   * @retval None
   */
 /**
-  * @brief  皮带标定结束时由 api_smd.c 在中断里调用：把排发电机所在槽位的 PU 寄存器镜像
-  *         同步为 SMD_PWM_FREQ_MIN（同 SP=0），避免下一帧任意写入按旧频率把皮带重新拉起
+  * @brief  下位机自己启停皮带（开机找零/标定）时由 api_smd.c 调用（可在中断里）：把排发电机所在
+  *         槽位的 DR/PU 寄存器镜像同步为实际值。镜像与实际不一致时，上位机下一帧任意写入会让槽位
+  *         循环按镜像把皮带改速/拉起/停下（停止时 PU 镜像要置 SMD_PWM_FREQ_MIN，同 SP=0）
+  * @param  dr  方向镜像；BELT_MIRROR_KEEP 表示不改
+  * @param  pu  频率镜像
   */
-void mbs_hook_belt_stopped(void);
+#define BELT_MIRROR_KEEP  0xFFFFu
+void mbs_hook_belt_mirror(uint16_t dr, uint16_t pu);
 
 void mbh_hook_rec01(uint8_t add, uint8_t *data, uint8_t datalen);
 void mbh_hook_rec02(uint8_t add, uint8_t *data, uint8_t datalen);
