@@ -317,11 +317,14 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch);
  * 检测 ch4 上升沿，记下当时的皮带脉冲总数作为零点；皮带进度 = (当前脉冲 − 零点脉冲)
  * / 一圈步数，以 16 位定点数（值/65536）经 Modbus 137 回读，0xFFFF = 无效。
  * 一圈步数开机从 EEPROM 读取（未标定用默认值），手动标定（Modbus 198 写1）：
- * 皮带以 BELT_CALIB_FREQ、dr=0 转动，相邻两次 ch4 上升沿的脉冲差即一圈步数，
- * 第二次上升沿时直接停皮带（不减速）并写 EEPROM。 */
+ * 皮带以 BELT_CALIB_FREQ、dr=0 连续转 BELT_CALIB_REVS 整圈：从第 1 次到第 BELT_CALIB_REVS+1
+ * 次 ch4 上升沿的脉冲差 / BELT_CALIB_REVS 即一圈步数（多圈平均），最后一次上升沿时直接停皮带
+ * （不减速）并写 EEPROM。上位机同期按 137 采集激光，6 圈平均成皮带轮廓表——皮带一圈约等于
+ * 激光下方从动辊 7.83 圈，单圈采集会混进随机相位的辊筒跳动，多圈平均可将其抵消。 */
 #define BELT_CYCLE_STEPS_DEFAULT   227091u   /* 未标定时的一圈步数（2026-10 实测） */
 #define BELT_CALIB_FREQ            1000u     /* 标定时皮带脉冲频率 Hz */
 #define BELT_CALIB_DR              0u        /* 标定时皮带方向（与生产方向一致） */
+#define BELT_CALIB_REVS            6u        /* 标定采集圈数（与上位机 SewingWorker 的 BELT_CALIB_REVS 一致） */
 #define BELT_POSITION_INVALID      0xFFFFu   /* 137 无效值：开机后尚未经过黑点 / 超出一圈(漏检) */
 
 void     SMD_Belt_Init(void);              /* 开机：EEPROM 读一圈步数 + 取 ch4 初始电平（GPIO/EEPROM 初始化之后调用） */

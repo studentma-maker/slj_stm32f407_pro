@@ -237,7 +237,8 @@
 #define BELT_POSITION_ADDR         137
 
 /* 皮带一圈步数手动标定（写1触发，处理后自动清零）：仅排发皮带停止时接受，
- * 皮带以 BELT_CALIB_FREQ、BELT_CALIB_DR 转动，两次 ch4 上升沿后直接停并写 EEPROM；
+ * 皮带以 BELT_CALIB_FREQ、BELT_CALIB_DR 连续转 BELT_CALIB_REVS 整圈，一圈步数取多圈平均，
+ * 数满后在 ch4 上升沿处直接停并写 EEPROM；
  * 标定期间上位机改写排发电机寄存器或写全部急停 → 中止标定 */
 #define BELT_PULSE_CYCLE_ADDR      198
 

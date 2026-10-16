@@ -1120,9 +1120,9 @@ static void SMD_ProcessChannel(SMD_Channel ch)
 
 /* ========================= 排发皮带零点 / 一圈步数（ch4 黑点） ========================= */
 #define BELT_CH4_DEBOUNCE_MS      3u   /* ch4 电平连续保持 3ms 才算翻转；边沿脉冲取第一次变化那一 ms */
-#define BELT_CALIB_TIMEOUT_REVS   3u   /* 标定走了 3 圈仍未见两次上升沿：停皮带放弃（ch4 未接/脏污） */
+#define BELT_CALIB_TIMEOUT_REVS   (BELT_CALIB_REVS + 2u)   /* 走了这么多圈仍未数满：停皮带放弃（ch4 未接/脏污/漏检） */
 
-typedef enum { BELT_CALIB_IDLE = 0, BELT_CALIB_WAIT_FIRST, BELT_CALIB_WAIT_SECOND } BeltCalibState;
+typedef enum { BELT_CALIB_IDLE = 0, BELT_CALIB_WAIT_FIRST, BELT_CALIB_COUNTING } BeltCalibState;
 
 static volatile uint32_t s_beltCycleSteps   = BELT_CYCLE_STEPS_DEFAULT;   /* 一圈步数 */
 static volatile uint32_t s_beltZeroPulse    = 0;    /* 最近一次 ch4 上升沿时的皮带脉冲总数 */
@@ -1133,6 +1133,7 @@ static uint32_t          s_ch4EdgePulse     = 0;    /* 本次电平变化第一 
 static volatile uint8_t  s_beltCalibState   = BELT_CALIB_IDLE;
 static uint32_t          s_beltCalibStart   = 0;    /* 进入标定时的脉冲总数（超时判定） */
 static uint32_t          s_beltCalibFirst   = 0;    /* 标定第一次上升沿的脉冲总数 */
+static uint8_t           s_beltCalibRevs    = 0;    /* 第一次上升沿之后已数到的整圈数 */
 static volatile uint8_t  s_beltSavePending  = 0;
 
 void SMD_Belt_Init(void)
@@ -1207,11 +1208,13 @@ static void SMD_Belt_OnRise(uint32_t pulse)
     if (s_beltCalibState == BELT_CALIB_WAIT_FIRST)
     {
         s_beltCalibFirst = pulse;
-        s_beltCalibState = BELT_CALIB_WAIT_SECOND;
+        s_beltCalibRevs  = 0;
+        s_beltCalibState = BELT_CALIB_COUNTING;
     }
-    else if (s_beltCalibState == BELT_CALIB_WAIT_SECOND)
+    else if (s_beltCalibState == BELT_CALIB_COUNTING && ++s_beltCalibRevs >= BELT_CALIB_REVS)
     {
-        const uint32_t steps = pulse - s_beltCalibFirst;
+        /* BELT_CALIB_REVS 圈总步数 / 圈数，四舍五入 */
+        const uint32_t steps = (pulse - s_beltCalibFirst + BELT_CALIB_REVS / 2u) / BELT_CALIB_REVS;
         s_beltCalibState = BELT_CALIB_IDLE;
         SMD_Belt_StopNow();
         if (steps > 0u)
