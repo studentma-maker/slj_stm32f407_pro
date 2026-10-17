@@ -321,7 +321,12 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch);
  * 次 ch4 上升沿的脉冲差 / BELT_CALIB_REVS 即一圈步数（多圈平均），最后一次上升沿时直接停皮带
  * （不减速）并写 EEPROM。上位机同期按 137 采集激光，6 圈平均成皮带轮廓表——皮带一圈约等于
  * 激光下方从动辊 7.83 圈，单圈采集会混进随机相位的辊筒跳动，多圈平均可将其抵消。 */
-#define BELT_CYCLE_STEPS_DEFAULT   227091u   /* 未标定时的一圈步数（2026-10 实测） */
+#define BELT_CYCLE_STEPS_DEFAULT   227138u   /* 一圈步数默认值：2026-10-16 两次 6 圈标定（227137/227139）的平均 */
+/* 一圈步数合理范围（默认值 ±20%）：EEPROM 读出值越界时用默认值，标定结果越界判失败、不写 EEPROM。
+ * 防止 ch4 抖动/误触发让标定"数满"得到一个离谱的值后写进 EEPROM——那样之后标定超时、找零超时、
+ * 137 进度都按这个错值算，标定永远数不满、无法自愈 */
+#define BELT_CYCLE_STEPS_MIN       181710u
+#define BELT_CYCLE_STEPS_MAX       272566u
 #define BELT_CALIB_FREQ            1000u     /* 标定时皮带脉冲频率 Hz */
 #define BELT_CALIB_DR              0u        /* 标定时皮带方向（与生产方向一致） */
 #define BELT_CALIB_REVS            6u        /* 标定采集圈数（与上位机 SewingWorker 的 BELT_CALIB_REVS 一致） */

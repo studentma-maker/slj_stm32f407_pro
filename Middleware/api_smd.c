@@ -1121,6 +1121,15 @@ static void SMD_ProcessChannel(SMD_Channel ch)
 /* ========================= 排发皮带零点 / 一圈步数（ch4 黑点） ========================= */
 #define BELT_CH4_DEBOUNCE_MS      3u   /* ch4 电平连续保持 3ms 才算翻转；边沿脉冲取第一次变化那一 ms */
 #define BELT_CALIB_TIMEOUT_REVS   (BELT_CALIB_REVS + 2u)   /* 走了这么多圈仍未数满：停皮带放弃（ch4 未接/脏污/漏检） */
+/* 零点门限：距上一个已接受零点不足 0.9 圈的 ch4 上升沿不接受（不清零、不计入标定）。
+ * 挡掉黑点边缘慢速抖动、皮带上其他深色斑点的误触发；漏检一次后下一个黑点在约 2 圈处，仍会被接受 */
+#define BELT_ZERO_GATE_NUM        9u
+#define BELT_ZERO_GATE_DEN        10u
+
+static uint8_t SMD_Belt_CycleValid(uint32_t steps)
+{
+    return (steps >= BELT_CYCLE_STEPS_MIN && steps <= BELT_CYCLE_STEPS_MAX) ? 1u : 0u;
+}
 
 typedef enum { BELT_CALIB_IDLE = 0, BELT_CALIB_WAIT_FIRST, BELT_CALIB_COUNTING } BeltCalibState;
 
@@ -1142,7 +1151,8 @@ void SMD_Belt_Init(void)
 {
     uint32_t steps = 0;
     EEPROM_ReadData(AT24Cxx_BELT_CYCLE_ADDR, (uint8_t *)&steps, 4);
-    s_beltCycleSteps = (steps == 0u || steps == 0xFFFFFFFFu) ? BELT_CYCLE_STEPS_DEFAULT : steps;
+    /* 空白芯片(0/0xFFFFFFFF)、或曾被写进越界值：都用默认值（不回写 EEPROM，下次标定成功会覆盖） */
+    s_beltCycleSteps = SMD_Belt_CycleValid(steps) ? steps : BELT_CYCLE_STEPS_DEFAULT;
     /* 以开机时电平为初始稳定值：上电时黑点正好在光电下，不能当成一次上升沿 */
     s_ch4Stable = IN_READ(Incom_Ch4) ? 1u : 0u;
 }
@@ -1151,16 +1161,18 @@ uint8_t SMD_Belt_CalibStart(void)
 {
     const SMD_Channel ch = MOTOR_PaiFa;
     if (s_beltCalibState != BELT_CALIB_IDLE || SMD_PWM_IsOutputOn(ch)) return 0;
-    s_beltCalibStart = MotorPulseTotal[ch];
-    s_beltCalibState = BELT_CALIB_WAIT_FIRST;
 
     /* 皮带已停：直接设方向并按 S 曲线升到标定频率（不依赖寄存器镜像差异触发，
-     * 镜像由调用方 mb_hook 同步为同样的 DR/PU，槽位循环不会再动它） */
+     * 镜像由调用方 mb_hook 同步为同样的 DR/PU，槽位循环不会再动它）。
+     * 先启动 PWM 再置标定状态：本函数在主循环里执行，若先置状态，1ms 中断恰好落在两步之间
+     * 会看到"标定中但 PWM 未开"而把标定取消 */
     smd_freq_gradient[ch].dir_change = 0;
     smd_freq_gradient[ch].dir_state  = SMD_DIR_NORMAL;
     SMD_DR(ch, BELT_CALIB_DR);
     SMD_PU_DATA[ch] = BELT_CALIB_FREQ;
     SMD_PWM_SetFreqGradient(ch, BELT_CALIB_FREQ, SMD_ACC_DATA[ch]);
+    s_beltCalibStart = MotorPulseTotal[ch];
+    s_beltCalibState = BELT_CALIB_WAIT_FIRST;
     return 1;
 }
 
@@ -1229,6 +1241,11 @@ static void SMD_Belt_DecelStop(void)
 
 static void SMD_Belt_OnRise(uint32_t pulse)
 {
+    /* 零点门限：已有零点时，距上一个零点不足 0.9 圈的上升沿视为误触发，忽略 */
+    if (s_beltZeroValid &&
+        (uint64_t)(pulse - s_beltZeroPulse) * BELT_ZERO_GATE_DEN < (uint64_t)s_beltCycleSteps * BELT_ZERO_GATE_NUM)
+        return;
+
     s_beltZeroPulse = pulse;
     s_beltZeroValid = 1;
 
@@ -1246,11 +1263,11 @@ static void SMD_Belt_OnRise(uint32_t pulse)
     }
     else if (s_beltCalibState == BELT_CALIB_COUNTING && ++s_beltCalibRevs >= BELT_CALIB_REVS)
     {
-        /* BELT_CALIB_REVS 圈总步数 / 圈数，四舍五入 */
+        /* BELT_CALIB_REVS 圈总步数 / 圈数，四舍五入；越界判失败（不更新、不写 EEPROM） */
         const uint32_t steps = (pulse - s_beltCalibFirst + BELT_CALIB_REVS / 2u) / BELT_CALIB_REVS;
         s_beltCalibState = BELT_CALIB_IDLE;
         SMD_Belt_StopNow();
-        if (steps > 0u)
+        if (SMD_Belt_CycleValid(steps))
         {
             s_beltCycleSteps  = steps;
             s_beltSavePending = 1;
