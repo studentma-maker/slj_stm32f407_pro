@@ -179,7 +179,7 @@ int main(void)
         /* USER CODE BEGIN 3 */
         mbh_poll(&mbhMCU);
         mbs_poll(&mbsUSB);
-        SMD_Belt_SaveIfPending();   /* 皮带标定成功后写 EEPROM（I2C 不放在中断里） */
+        SMD_Belt_SaveIfPending();   /* 皮带 EEPROM 写入：标定一圈步数/圈计数纪元/停稳位置记录（I2C 不放在中断里） */
     }
 
     /* USER CODE END 3 */

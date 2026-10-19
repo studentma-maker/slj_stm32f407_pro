@@ -25,6 +25,17 @@ extern "C" {
  * 读到的值不在 BELT_CYCLE_STEPS_MIN~MAX（含新芯片空白值 0/0xFFFFFFFF）时使用默认值 BELT_CYCLE_STEPS_DEFAULT */
 #define AT24Cxx_BELT_CYCLE_ADDR     24
 
+/* 排发皮带圈计数纪元（uint16，2字节，28~29）：圈计数链断开（开机无可用位置记录/核对失败/
+ * 皮带反转）时 +1 写入，次数很少。上位机据此判断辊筒相位标定所依赖的圈计数是否仍然连续 */
+#define AT24Cxx_BELT_EPOCH_ADDR     28
+
+/* 排发皮带停稳位置记录：BELT_REC_SLOTS 个 8 字节槽位（64~127，每槽恰好占 24C02 的一页），
+ * 皮带停稳时轮流写入下一个槽位、开动时把当前槽位作废，同一时刻最多一个有效槽位；
+ * 轮流写使每个槽位的擦写次数降为 1/BELT_REC_SLOTS。格式见 api_smd.c 的 SMD_Belt_RecEncode */
+#define AT24Cxx_BELT_REC_ADDR       64
+#define BELT_REC_SLOTS              8
+#define BELT_REC_SIZE               8
+
 /* 导出函数声明 ------------------------------------------------------------*/
 
 /**

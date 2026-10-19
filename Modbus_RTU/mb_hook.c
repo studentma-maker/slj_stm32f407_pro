@@ -181,6 +181,9 @@ void mbs_hook_updata_holding(mbs *_mbs)
     _mbs->regHoldingBuf[BELT_PULSE_LOW_ADDR]  = (uint16_t)(beltPulse & 0xFFFFu);
     /* 皮带一圈进度：每次应答前现算 */
     _mbs->regHoldingBuf[BELT_POSITION_ADDR]   = SMD_Belt_GetPosition();
+    _mbs->regHoldingBuf[BELT_REV_COUNT_ADDR]  = SMD_Belt_GetRevCount();
+    _mbs->regHoldingBuf[BELT_STATUS_ADDR]     = SMD_Belt_GetStatus();
+    _mbs->regHoldingBuf[BELT_REV_EPOCH_ADDR]  = SMD_Belt_GetEpoch();
 }
 
 /**

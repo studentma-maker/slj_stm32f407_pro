@@ -236,6 +236,16 @@
  * 应答轮询前按 (当前脉冲 − 零点脉冲) / 一圈步数 现算，见 api_smd.h 皮带零点说明 */
 #define BELT_POSITION_ADDR         137
 
+/* 皮带圈计数（只读，辊筒偏心补偿用，见 api_smd.h"断电前位置记录 + 圈计数"）：
+ *   138 = 圈计数 0~BELT_REV_WRAP-1（每接受一个 ch4 零点加经过的整圈数；开机零点与断电前停稳位置
+ *         吻合时接着断电前计数），BELT_REV_COUNT_INVALID = 尚无零点
+ *   139 = 状态位 BELT_ST_*（零点有效 / 零点已与断电前位置核对 / 核对中 / 核对失败 / 开机无记录）
+ *   140 = 圈计数纪元：计数链断开（开机无记录、核对失败、皮带反转）一次 +1，EEPROM 持久。
+ *         上位机标定辊筒相位时记下纪元，纪元变了说明圈号不再连续，须重测相位 */
+#define BELT_REV_COUNT_ADDR        138
+#define BELT_STATUS_ADDR           139
+#define BELT_REV_EPOCH_ADDR        140
+
 /* 皮带一圈步数手动标定（写1触发，处理后自动清零）：仅排发皮带停止时接受，
  * 皮带以 BELT_CALIB_FREQ、BELT_CALIB_DR 连续转 BELT_CALIB_REVS 整圈，一圈步数取多圈平均，
  * 数满后在 ch4 上升沿处直接停并写 EEPROM；

@@ -1147,6 +1147,58 @@ static volatile uint8_t  s_beltSavePending  = 0;
 static volatile uint8_t  s_beltSeeking      = 0;    /* 开机找零进行中 */
 static uint32_t          s_beltSeekStart    = 0;    /* 开始找零时的脉冲总数（超时判定） */
 
+/* 断电前位置记录 / 圈计数（见 api_smd.h 说明） */
+#define BELT_REC_MAGIC 0xB5u
+static volatile uint16_t s_beltRevCount     = 0;    /* 圈计数，模 BELT_REV_WRAP */
+static volatile uint16_t s_beltEpoch        = 0;    /* 圈计数纪元（EEPROM 持久） */
+static volatile uint8_t  s_beltEpochPending = 0;    /* 纪元已变、待主循环写 EEPROM */
+static volatile uint16_t s_beltStatus       = 0;    /* BELT_ST_*，不含 ZERO_VALID（现算） */
+static uint32_t          s_beltExpectLo     = 0;    /* 开机零点核对窗口（开机后脉冲总数） */
+static uint32_t          s_beltExpectHi     = 0;
+static uint16_t          s_beltBootCount    = 0;    /* 记录里的圈计数 */
+static volatile uint16_t s_beltStillMs      = BELT_REC_STILL_MS;   /* 排发电机连续停止 ms 数（饱和）；开机视为已停稳，不白白作废记录 */
+static int8_t            s_beltRecSlot      = -1;   /* EEPROM 里当前有效记录的槽位，-1=无（仅主循环/初始化访问） */
+static uint8_t           s_beltRecNext      = 0;    /* 下一次写入的槽位 */
+
+/* 记录格式（8 字节）：[0]=BELT_REC_MAGIC（作废写 0） [1..2]=圈计数 [3..5]=距零点步数(24 位)
+ *                    [6]=保留 0 [7]=校验 = (字节 0..6 之和) ^ 0xA5；多字节均小端 */
+static uint8_t SMD_Belt_RecSum(const uint8_t *r)
+{
+    uint8_t s = 0;
+    for (int i = 0; i < BELT_REC_SIZE - 1; i++) s = (uint8_t)(s + r[i]);
+    return (uint8_t)(s ^ 0xA5u);
+}
+
+static void SMD_Belt_RecEncode(uint8_t *r, uint16_t count, uint32_t offset)
+{
+    r[0] = BELT_REC_MAGIC;
+    r[1] = (uint8_t)count;            r[2] = (uint8_t)(count >> 8);
+    r[3] = (uint8_t)offset;           r[4] = (uint8_t)(offset >> 8);  r[5] = (uint8_t)(offset >> 16);
+    r[6] = 0;
+    r[7] = SMD_Belt_RecSum(r);
+}
+
+static uint8_t SMD_Belt_RecValid(const uint8_t *r)
+{
+    return (r[0] == BELT_REC_MAGIC && r[7] == SMD_Belt_RecSum(r)) ? 1u : 0u;
+}
+
+/* 圈计数链断开（初始化或 1ms 中断里调用）：纪元 +1，计数从 0 重新开始，跨断电连续性失效 */
+static void SMD_Belt_ChainBreak(void)
+{
+    s_beltEpoch        = (uint16_t)(s_beltEpoch + 1u);
+    s_beltEpochPending = 1;
+    s_beltRevCount     = 0;
+    s_beltStatus      &= (uint16_t)~BELT_ST_ZERO_VERIFIED;
+}
+
+/* 开机零点核对失败：放弃窗口，下一个上升沿按常规接受 */
+static void SMD_Belt_VerifyFail(void)
+{
+    s_beltStatus = (uint16_t)((s_beltStatus & ~BELT_ST_VERIFY_PENDING) | BELT_ST_VERIFY_FAILED);
+    SMD_Belt_ChainBreak();
+}
+
 void SMD_Belt_Init(void)
 {
     uint32_t steps = 0;
@@ -1155,6 +1207,48 @@ void SMD_Belt_Init(void)
     s_beltCycleSteps = SMD_Belt_CycleValid(steps) ? steps : BELT_CYCLE_STEPS_DEFAULT;
     /* 以开机时电平为初始稳定值：上电时黑点正好在光电下，不能当成一次上升沿 */
     s_ch4Stable = IN_READ(Incom_Ch4) ? 1u : 0u;
+
+    uint16_t epoch = 0;
+    EEPROM_ReadData(AT24Cxx_BELT_EPOCH_ADDR, (uint8_t *)&epoch, 2);   /* 空白芯片读到什么都行，只比较是否变化 */
+    s_beltEpoch = epoch;
+
+    uint8_t rec[BELT_REC_SLOTS][BELT_REC_SIZE];
+    EEPROM_ReadData(AT24Cxx_BELT_REC_ADDR, &rec[0][0], sizeof(rec));
+    int found = -1, nValid = 0;
+    for (int i = 0; i < BELT_REC_SLOTS; i++)
+    {
+        if (!SMD_Belt_RecValid(rec[i])) continue;
+        nValid++;
+        found = i;
+    }
+
+    const uint32_t cycle = s_beltCycleSteps;
+    const uint32_t tol   = cycle / BELT_ZERO_VERIFY_TOL_DEN;
+    uint32_t offset = 0;
+    if (nValid == 1)
+        offset = (uint32_t)rec[found][3] | ((uint32_t)rec[found][4] << 8) | ((uint32_t)rec[found][5] << 16);
+
+    if (nValid == 1 && offset <= cycle + tol)
+    {
+        /* 开机脉冲总数从 0 计，当前位置就是断电前的停稳位置：下一个真黑点在 (一圈 − offset) 处 */
+        const uint32_t rem = (offset < cycle) ? (cycle - offset) : 0u;
+        s_beltExpectLo  = (rem > tol) ? (rem - tol) : 0u;
+        s_beltExpectHi  = rem + tol;
+        s_beltBootCount = (uint16_t)((uint16_t)rec[found][1] | ((uint16_t)rec[found][2] << 8));
+        s_beltStatus    = BELT_ST_VERIFY_PENDING;
+        s_beltRecSlot   = (int8_t)found;
+        s_beltRecNext   = (uint8_t)((found + 1) % BELT_REC_SLOTS);
+    }
+    else
+    {
+        /* 没有记录（运动中断电/新芯片），或多于一个有效槽位（作废写失败，无法判断哪个新）：全部作废 */
+        static const uint8_t zero = 0;
+        for (int i = 0; i < BELT_REC_SLOTS; i++)
+            if (SMD_Belt_RecValid(rec[i]))
+                EEPROM_WriteData((uint16_t)(AT24Cxx_BELT_REC_ADDR + i * BELT_REC_SIZE), (uint8_t *)&zero, 1);
+        s_beltStatus = BELT_ST_NO_RECORD;
+        SMD_Belt_ChainBreak();
+    }
 }
 
 uint8_t SMD_Belt_CalibStart(void)
@@ -1206,12 +1300,63 @@ uint16_t SMD_Belt_GetPosition(void)
     return (q >= BELT_POSITION_INVALID) ? BELT_POSITION_INVALID : (uint16_t)q;
 }
 
+uint16_t SMD_Belt_GetRevCount(void)
+{
+    return s_beltZeroValid ? s_beltRevCount : BELT_REV_COUNT_INVALID;
+}
+
+uint16_t SMD_Belt_GetStatus(void)
+{
+    return (uint16_t)(s_beltStatus | (s_beltZeroValid ? BELT_ST_ZERO_VALID : 0u));
+}
+
+uint16_t SMD_Belt_GetEpoch(void)
+{
+    return s_beltEpoch;
+}
+
 void SMD_Belt_SaveIfPending(void)
 {
-    if (!s_beltSavePending) return;
-    s_beltSavePending = 0;
-    uint32_t steps = s_beltCycleSteps;
-    EEPROM_WriteData(AT24Cxx_BELT_CYCLE_ADDR, (uint8_t *)&steps, 4);
+    if (s_beltSavePending)
+    {
+        s_beltSavePending = 0;
+        uint32_t steps = s_beltCycleSteps;
+        EEPROM_WriteData(AT24Cxx_BELT_CYCLE_ADDR, (uint8_t *)&steps, 4);
+        return;
+    }
+
+    /* 纪元先于位置记录落盘：记录里的圈计数属于当前纪元 */
+    if (s_beltEpochPending)
+    {
+        s_beltEpochPending = 0;
+        uint16_t epoch = s_beltEpoch;
+        EEPROM_WriteData(AT24Cxx_BELT_EPOCH_ADDR, (uint8_t *)&epoch, 2);
+        return;
+    }
+
+    if (s_beltStillMs < BELT_REC_STILL_MS)
+    {
+        /* 皮带在动（或刚停）：作废已存的记录，此后断电则开机按无记录处理 */
+        if (s_beltRecSlot >= 0)
+        {
+            static const uint8_t zero = 0;
+            EEPROM_WriteData((uint16_t)(AT24Cxx_BELT_REC_ADDR + s_beltRecSlot * BELT_REC_SIZE), (uint8_t *)&zero, 1);
+            s_beltRecSlot = -1;
+        }
+        return;
+    }
+
+    /* 停稳：没有零点（尚未找到/反转后）或已经存过就不写；停着时位置和计数都不变 */
+    if (s_beltRecSlot >= 0 || !s_beltZeroValid) return;
+    const uint32_t cycle  = s_beltCycleSteps;
+    const uint32_t offset = MotorPulseTotal[MOTOR_PaiFa] - s_beltZeroPulse;
+    if (offset > cycle + cycle / BELT_ZERO_VERIFY_TOL_DEN) return;   /* 超出一圈多仍未见黑点（漏检），位置不可信 */
+
+    uint8_t rec[BELT_REC_SIZE];
+    SMD_Belt_RecEncode(rec, s_beltRevCount, offset);
+    EEPROM_WriteData((uint16_t)(AT24Cxx_BELT_REC_ADDR + s_beltRecNext * BELT_REC_SIZE), rec, BELT_REC_SIZE);
+    s_beltRecSlot = (int8_t)s_beltRecNext;
+    s_beltRecNext = (uint8_t)((s_beltRecNext + 1u) % BELT_REC_SLOTS);
 }
 
 /* 标定结束：直接停皮带（不减速），清运动状态，同 SP=0 急停；寄存器镜像由 mb_hook 同步 */
@@ -1241,10 +1386,33 @@ static void SMD_Belt_DecelStop(void)
 
 static void SMD_Belt_OnRise(uint32_t pulse)
 {
-    /* 零点门限：已有零点时，距上一个零点不足 0.9 圈的上升沿视为误触发，忽略 */
-    if (s_beltZeroValid &&
-        (uint64_t)(pulse - s_beltZeroPulse) * BELT_ZERO_GATE_DEN < (uint64_t)s_beltCycleSteps * BELT_ZERO_GATE_NUM)
-        return;
+    if (s_beltStatus & BELT_ST_VERIFY_PENDING)
+    {
+        /* 开机零点核对：窗口之前的上升沿是皮带污点，忽略（找零继续）；窗口内的是真黑点，
+         * 圈计数接上断电前；越过窗口（1ms 中断尚未判失败的同一 ms 内）按核对失败、常规接受 */
+        if (pulse < s_beltExpectLo) return;
+        if (pulse <= s_beltExpectHi)
+        {
+            s_beltStatus   = (uint16_t)((s_beltStatus & ~BELT_ST_VERIFY_PENDING) | BELT_ST_ZERO_VERIFIED);
+            s_beltRevCount = (uint16_t)((s_beltBootCount + 1u) % BELT_REV_WRAP);
+        }
+        else
+        {
+            SMD_Belt_VerifyFail();
+        }
+    }
+    else if (s_beltZeroValid)
+    {
+        /* 零点门限：已有零点时，距上一个零点不足 0.9 圈的上升沿视为误触发，忽略 */
+        const uint32_t d = pulse - s_beltZeroPulse;
+        if ((uint64_t)d * BELT_ZERO_GATE_DEN < (uint64_t)s_beltCycleSteps * BELT_ZERO_GATE_NUM)
+            return;
+        /* 加经过的整圈数：漏检一次黑点时这里是 2，圈号 mod 6 不错位 */
+        uint32_t revs = (d + s_beltCycleSteps / 2u) / s_beltCycleSteps;
+        if (revs == 0u) revs = 1u;
+        s_beltRevCount = (uint16_t)((s_beltRevCount + revs) % BELT_REV_WRAP);
+    }
+    /* 否则：计数链断开后的第一个零点，圈计数保持 ChainBreak 置的 0 */
 
     s_beltZeroPulse = pulse;
     s_beltZeroValid = 1;
@@ -1275,9 +1443,27 @@ static void SMD_Belt_OnRise(uint32_t pulse)
     }
 }
 
-/* 每 1ms：ch4 消抖 + 上升沿置零点 + 标定超时（须在 SMD_PulseCountTick 之后调用） */
+/* 每 1ms：停稳计时/反转检测 + ch4 消抖 + 上升沿置零点 + 开机零点核对超窗 + 标定超时
+ * （须在 SMD_PulseCountTick 之后调用） */
 static void SMD_Belt_Tick(void)
 {
+    if (SMD_PWM_IsOutputOn(MOTOR_PaiFa))
+    {
+        s_beltStillMs = 0;
+        /* 反转：脉冲总数不分方向，零点之后的位置、圈计数都不再可信，等下一个黑点重新建立 */
+        if (SMD_DR_READ(MOTOR_PaiFa) != BELT_CALIB_DR &&
+            (s_beltZeroValid || (s_beltStatus & BELT_ST_VERIFY_PENDING)))
+        {
+            s_beltZeroValid = 0;
+            s_beltStatus   &= (uint16_t)~BELT_ST_VERIFY_PENDING;
+            SMD_Belt_ChainBreak();
+        }
+    }
+    else if (s_beltStillMs < 0xFFFFu)
+    {
+        s_beltStillMs++;
+    }
+
     const uint8_t raw = IN_READ(Incom_Ch4) ? 1u : 0u;
     if (raw != s_ch4Stable)
     {
@@ -1293,6 +1479,12 @@ static void SMD_Belt_Tick(void)
     {
         s_ch4Cnt = 0;
     }
+
+    /* 开机零点核对：走过窗口仍没有上升沿（断电期间皮带被挪动 / 黑点漏检）→ 放弃核对。
+     * ch4 正在消抖时先不判：那个沿的起点脉冲可能还在窗口内 */
+    if ((s_beltStatus & BELT_ST_VERIFY_PENDING) && s_ch4Cnt == 0u &&
+        MotorPulseTotal[MOTOR_PaiFa] > s_beltExpectHi)
+        SMD_Belt_VerifyFail();
 
     if (s_beltCalibState != BELT_CALIB_IDLE &&
         (MotorPulseTotal[MOTOR_PaiFa] - s_beltCalibStart) > BELT_CALIB_TIMEOUT_REVS * s_beltCycleSteps)

@@ -333,16 +333,42 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch);
 #define BELT_POSITION_INVALID      0xFFFFu   /* 137 无效值：开机后尚未经过黑点 / 超出一圈(漏检) */
 #define BELT_ZERO_FREQ             8000u     /* 开机找零：皮带转动频率 Hz（= SMD_PWM_FREQ_MAX，同生产高速；方向同 BELT_CALIB_DR） */
 
-void     SMD_Belt_Init(void);              /* 开机：EEPROM 读一圈步数 + 取 ch4 初始电平（GPIO/EEPROM 初始化之后调用） */
+/* ---- 断电前位置记录 + 圈计数（辊筒偏心补偿用） ----
+ * 皮带停稳 BELT_REC_STILL_MS 后把"距上一零点的步数 + 圈计数"写 EEPROM，开动即作废（断电时皮带
+ * 一定停着，因此不依赖上位机关机命令；运动中断电则没有有效记录，开机按无记录处理）。
+ * 开机若有有效记录：下一个真黑点应在 (一圈步数 − 记录步数) 处，第一个零点只接受落在
+ * ±一圈步数/BELT_ZERO_VERIFY_TOL_DEN 窗口内的上升沿（窗口前的视为皮带污点，忽略，找零继续），
+ * 接受后圈计数 = 记录值 + 1，与断电前连续；走过窗口仍没有上升沿 → 核对失败，回到"接受下一个
+ * 上升沿"并断开圈计数链（断电期间皮带被挪动 / 黑点漏检）。
+ * 圈计数：每接受一个零点加经过的整圈数（漏检一次加 2），模 BELT_REV_WRAP（6 的倍数，保证圈号
+ * mod 6 跨回绕仍正确）；计数链断开时纪元 +1、计数从 0 重新开始。 */
+#define BELT_REV_WRAP              60000u    /* 圈计数回绕值（6 的倍数，辊筒 47 圈 = 皮带 6 圈） */
+#define BELT_REC_STILL_MS          500u      /* 排发电机连续停止这么久才写位置记录 */
+#define BELT_ZERO_VERIFY_TOL_DEN   20u       /* 开机零点核对窗口 ±一圈/20（约 ±40mm；最近的污点距黑点约 0.19 圈） */
+#define BELT_REV_COUNT_INVALID     0xFFFFu   /* 138 无效值：开机后尚未得到零点 */
+/* 139 状态位 */
+#define BELT_ST_ZERO_VALID         0x0001u   /* 137/138 有效 */
+#define BELT_ST_ZERO_VERIFIED      0x0002u   /* 本次开机第一个零点与断电前记录吻合（圈计数跨断电连续） */
+#define BELT_ST_VERIFY_PENDING     0x0004u   /* 正在等落在预期窗口内的上升沿 */
+#define BELT_ST_VERIFY_FAILED      0x0008u   /* 有记录但预期窗口内没有上升沿（皮带断电时被挪动/漏检） */
+#define BELT_ST_NO_RECORD          0x0010u   /* 开机时 EEPROM 没有可用的停稳位置记录 */
+
+void     SMD_Belt_Init(void);              /* 开机：EEPROM 读一圈步数/纪元/停稳位置记录 + 取 ch4 初始电平（GPIO/EEPROM 初始化之后、1ms 中断启动之前调用） */
 uint8_t  SMD_Belt_CalibStart(void);        /* 进入标定并以 BELT_CALIB_FREQ/BELT_CALIB_DR 启动皮带（皮带停止时才接受）；返回1=已接受 */
-/* 开机找零：初始化时调用，以 BELT_ZERO_FREQ 转动皮带直到 ch4 上升沿（零点在上升沿当场锁存），
+/* 开机找零：初始化时调用，以 BELT_ZERO_FREQ 转动皮带直到 ch4 上升沿（零点在上升沿当场锁存；有断电前
+ * 停稳位置记录时只接受预期窗口内的上升沿，窗口前的污点忽略，见上方"断电前位置记录"），
  * 随后 S 曲线减速停（不硬停，避免高速急停丢步让零点之后的位置偏掉）；走 1.5 圈仍未见黑点则减速停放弃 */
 void     SMD_Belt_SeekZeroStart(void);
 /* 中止下位机自己发起的皮带动作（标定/开机找零）的判定，不停电机：上位机接管排发电机
  * （写 DR/STEP/PU/SP）或写全部急停时调用 */
 void     SMD_Belt_AutoCancel(void);
 uint16_t SMD_Belt_GetPosition(void);       /* 皮带进度定点数（值/65536），无效返回 BELT_POSITION_INVALID */
-void     SMD_Belt_SaveIfPending(void);     /* 主循环调用：标定成功后把一圈步数写 EEPROM（不在中断里做 I2C） */
+uint16_t SMD_Belt_GetRevCount(void);       /* 圈计数（0~BELT_REV_WRAP-1），无零点返回 BELT_REV_COUNT_INVALID */
+uint16_t SMD_Belt_GetStatus(void);         /* BELT_ST_* 状态位 */
+uint16_t SMD_Belt_GetEpoch(void);          /* 圈计数纪元，计数链断开一次 +1 */
+/* 主循环调用（不在中断里做 I2C，每次至多一项写入，每项阻塞约 6ms）：标定成功后写一圈步数、
+ * 计数链断开后写纪元、皮带停稳时写位置记录 / 开动时作废记录 */
+void     SMD_Belt_SaveIfPending(void);
 
 /**
   * @brief  根据当前速度/加速度反推减速到目标速度所需的步数
