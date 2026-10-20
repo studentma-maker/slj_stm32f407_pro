@@ -305,17 +305,19 @@ HAL_StatusTypeDef SMD_PWM_Stop(SMD_Channel ch);
 HAL_StatusTypeDef SMD_PWM_SetFreq(SMD_Channel ch, uint32_t freq);
 
 /**
-  * @brief  读取指定通道"已输出脉冲总数"（自由运行的 32 位无符号计数，只增不清，不分方向）
+  * @brief  读取指定通道"已输出脉冲总数"（自由运行的 32 位计数，不清零；其他通道只增不减，
+  *         排发皮带 MOTOR_PaiFa 方向不是 BELT_CALIB_DR（反转）时累减）
   * @note   一个脉冲 = 驱动器收到的一个 PU 脉冲（与上位机 feedMmPerStep 的"步"同义）。
-  *         回绕无妨：使用方应做无符号取模差分 (uint32_t)(now - prev)。
+  *         回绕无妨：使用方应做取模差分 (int32_t)(uint32_t)(now - prev)，负值 = 反转。
   *         皮带（排发电机，MOTOR_PaiFa）的该值通过 Modbus 135/136 只读回读。
   */
 uint32_t SMD_GetPulseTotal(SMD_Channel ch);
 
 /* ==================== 排发皮带零点 / 一圈步数（ch4 黑点） ====================
  * 排发皮带侧涂黑点，漫反射光电 ch4（Incom_Ch4，触发=高电平）检测。1ms 中断里消抖
- * 检测 ch4 上升沿，记下当时的皮带脉冲总数作为零点；皮带进度 = (当前脉冲 − 零点脉冲)
- * / 一圈步数，以 16 位定点数（值/65536）经 Modbus 137 回读，0xFFFF = 无效。
+ * 检测黑点前沿（正转 ch4 上升沿 / 反转 ch4 下降沿，同一物理位置），记下当时的皮带脉冲总数
+ * 作为零点；皮带进度 = (当前脉冲 − 零点脉冲) / 一圈步数（反转时脉冲倒退，越过零点退回上一圈），
+ * 以 16 位定点数（值/65536）经 Modbus 137 回读，0xFFFF = 无效。
  * 一圈步数开机从 EEPROM 读取（未标定用默认值），手动标定（Modbus 198 写1）：
  * 皮带以 BELT_CALIB_FREQ、dr=0 连续转 BELT_CALIB_REVS 整圈：从第 1 次到第 BELT_CALIB_REVS+1
  * 次 ch4 上升沿的脉冲差 / BELT_CALIB_REVS 即一圈步数（多圈平均），最后一次上升沿时直接停皮带
@@ -330,7 +332,7 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch);
 #define BELT_CALIB_FREQ            1000u     /* 标定时皮带脉冲频率 Hz */
 #define BELT_CALIB_DR              0u        /* 标定时皮带方向（与生产方向一致） */
 #define BELT_CALIB_REVS            6u        /* 标定采集圈数（与上位机 SewingWorker 的 BELT_CALIB_REVS 一致） */
-#define BELT_POSITION_INVALID      0xFFFFu   /* 137 无效值：开机后尚未经过黑点 / 超出一圈(漏检) */
+#define BELT_POSITION_INVALID      0xFFFFu   /* 137 无效值：开机后尚未经过黑点 / 正反向超出一圈(漏检) */
 #define BELT_ZERO_FREQ             8000u     /* 开机找零：皮带转动频率 Hz（= SMD_PWM_FREQ_MAX，同生产高速；方向同 BELT_CALIB_DR） */
 
 /* ---- 断电前位置记录 + 圈计数（辊筒偏心补偿用） ----
@@ -340,8 +342,9 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch);
  * ±一圈步数/BELT_ZERO_VERIFY_TOL_DEN 窗口内的上升沿（窗口前的视为皮带污点，忽略，找零继续），
  * 接受后圈计数 = 记录值 + 1，与断电前连续；走过窗口仍没有上升沿 → 核对失败，回到"接受下一个
  * 上升沿"并断开圈计数链（断电期间皮带被挪动 / 黑点漏检）。
- * 圈计数：每接受一个零点加经过的整圈数（漏检一次加 2），模 BELT_REV_WRAP（6 的倍数，保证圈号
- * mod 6 跨回绕仍正确）；计数链断开时纪元 +1、计数从 0 重新开始。 */
+ * 圈计数：每接受一个零点加经过的整圈数（漏检一次加 2，反转时减），模 BELT_REV_WRAP（6 的倍数，
+ * 保证圈号 mod 6 跨回绕仍正确）；计数链断开时纪元 +1、计数从 0 重新开始。开机核对窗口按正转
+ * 推算，核对中反转则放弃核对、断开计数链；核对完成后正反转都不断链。 */
 #define BELT_REV_WRAP              60000u    /* 圈计数回绕值（6 的倍数，辊筒 47 圈 = 皮带 6 圈） */
 #define BELT_REC_STILL_MS          500u      /* 排发电机连续停止这么久才写位置记录 */
 #define BELT_ZERO_VERIFY_TOL_DEN   20u       /* 开机零点核对窗口 ±一圈/20（约 ±40mm；最近的污点距黑点约 0.19 圈） */
@@ -362,8 +365,9 @@ void     SMD_Belt_SeekZeroStart(void);
 /* 中止下位机自己发起的皮带动作（标定/开机找零）的判定，不停电机：上位机接管排发电机
  * （写 DR/STEP/PU/SP）或写全部急停时调用 */
 void     SMD_Belt_AutoCancel(void);
-uint16_t SMD_Belt_GetPosition(void);       /* 皮带进度定点数（值/65536），无效返回 BELT_POSITION_INVALID */
-uint16_t SMD_Belt_GetRevCount(void);       /* 圈计数（0~BELT_REV_WRAP-1），无零点返回 BELT_REV_COUNT_INVALID */
+/* 同一时刻的皮带脉冲总数 + 进度定点数（值/65536，无效 BELT_POSITION_INVALID）+ 圈计数
+ * （0~BELT_REV_WRAP-1，与进度同时无效 BELT_REV_COUNT_INVALID）；主循环调用，内部短暂关中断 */
+void     SMD_Belt_Snapshot(uint32_t *pulse, uint16_t *pos, uint16_t *rev);
 uint16_t SMD_Belt_GetStatus(void);         /* BELT_ST_* 状态位 */
 uint16_t SMD_Belt_GetEpoch(void);          /* 圈计数纪元，计数链断开一次 +1 */
 /* 主循环调用（不在中断里做 I2C，每次至多一项写入，每项阻塞约 6ms）：标定成功后写一圈步数、

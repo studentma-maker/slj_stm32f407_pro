@@ -176,12 +176,13 @@ void mbs_hook_updata_holding(mbs *_mbs)
 
     /* 皮带脉冲总数：先取一次 32 位快照再拆高低位，保证高低两个寄存器来自同一时刻。
      * 本函数在每次 Modbus 请求处理前调用（mb_slave.c），读到的就是应答时刻的值 */
-    const uint32_t beltPulse = SMD_GetPulseTotal(MOTOR_PaiFa);
+    uint32_t beltPulse;
+    uint16_t beltPos, beltRev;
+    SMD_Belt_Snapshot(&beltPulse, &beltPos, &beltRev);   /* 脉冲/进度/圈计数同一时刻现算 */
     _mbs->regHoldingBuf[BELT_PULSE_HIGH_ADDR] = (uint16_t)(beltPulse >> 16);
     _mbs->regHoldingBuf[BELT_PULSE_LOW_ADDR]  = (uint16_t)(beltPulse & 0xFFFFu);
-    /* 皮带一圈进度：每次应答前现算 */
-    _mbs->regHoldingBuf[BELT_POSITION_ADDR]   = SMD_Belt_GetPosition();
-    _mbs->regHoldingBuf[BELT_REV_COUNT_ADDR]  = SMD_Belt_GetRevCount();
+    _mbs->regHoldingBuf[BELT_POSITION_ADDR]   = beltPos;
+    _mbs->regHoldingBuf[BELT_REV_COUNT_ADDR]  = beltRev;
     _mbs->regHoldingBuf[BELT_STATUS_ADDR]     = SMD_Belt_GetStatus();
     _mbs->regHoldingBuf[BELT_REV_EPOCH_ADDR]  = SMD_Belt_GetEpoch();
 }
