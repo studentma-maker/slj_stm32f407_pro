@@ -31,6 +31,8 @@
 #include "api_smd.h"
 #include "api_motor_control.h"
 #include "api_eeprom.h"
+#include "mb_hook.h"
+#include "mb_fwupd.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,6 +54,7 @@
 
 /* USER CODE BEGIN PV */
 uint32_t Cnt = 0;
+extern uint32_t __Vectors[];   /* startup_stm32f407xx.s 的向量表（链接在 0x08010000，前面是 bootloader） */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,7 +76,9 @@ int main(void)
 {
 
     /* USER CODE BEGIN 1 */
-
+    /* 程序由 bootloader 跳转进来时 bootloader 已设好 VTOR；用 ST-Link 直接下载调试时复位后
+     * 先跑 bootloader 再跳过来，同样如此。这里按链接出来的向量表地址再设一次，不依赖调用方 */
+    SCB->VTOR = (uint32_t)__Vectors;
     /* USER CODE END 1 */
 
     /* MCU Configuration--------------------------------------------------------*/
@@ -135,6 +140,7 @@ int main(void)
     SMD_Belt_Init();   /* 排发皮带一圈步数（EEPROM）+ ch4 初始电平 */
     mbh_init(&mbhMCU);
     mbs_init(&mbsUSB);
+    fwu_init(FWU_MODE_APP, g_fwuInfo.ver_major, g_fwuInfo.ver_minor, g_fwuInfo.ver_patch);
     API_MOTOR_Init(&htim4, 5000);
 #if M6TOSERVO_ENABLE
     /* 舵机初始化：TIM2_CH2 配 50Hz 基时，从EEPROM载入参数
@@ -180,6 +186,10 @@ int main(void)
         mbh_poll(&mbhMCU);
         mbs_poll(&mbsUSB);
         SMD_Belt_SaveIfPending();   /* 皮带 EEPROM 写入：标定一圈步数/圈计数纪元/停稳位置记录（I2C 不放在中断里） */
+
+        /* 上位机升级命令 REBOOT/ENTER_BOOT：应答发出后复位，由 bootloader 安装新固件或停在升级模式 */
+        if (fwu_poll(HAL_GetTick()))
+            NVIC_SystemReset();
     }
 
     /* USER CODE END 3 */

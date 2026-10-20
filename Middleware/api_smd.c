@@ -265,6 +265,18 @@ uint32_t SMD_GetPulseTotal(SMD_Channel ch)
     return (ch < SMD_CH_MAX) ? MotorPulseTotal[ch] : 0u;
 }
 
+uint8_t SMD_AnyOutputOn(void)
+{
+    for (int ch = 0; ch < SMD_CH_MAX; ch++)
+    {
+#if M6TOSERVO_ENABLE
+        if (ch == SERVO_CH) continue;  /* 舵机通道一直输出 50Hz 伺服信号，不算电机运行 */
+#endif
+        if (SMD_PWM_IsOutputOn((SMD_Channel)ch)) return 1u;
+    }
+    return 0u;
+}
+
 /* ========================= 内部：直接写入硬件定时器频率（不停PWM） ========================= */
 /**
  * @brief  仅更新PSC/ARR寄存器，不停止PWM，适合中断内调用

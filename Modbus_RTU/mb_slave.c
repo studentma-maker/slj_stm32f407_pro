@@ -10,6 +10,7 @@
 #include "mb_port.h"
 #include "mb_hook.h"
 #include "mb_crc.h"
+#include "mb_fwupd.h"
 #include "string.h"
 #include "usart.h"
 #include "tim.h"
@@ -65,6 +66,76 @@ void mbs_send(mbs *_mbs)
 
     _mbs->state = MBS_STATE_TX;
     _mbs->uartEnable(&_mbs->huart, 1, 0); /* enable tx, disable rx */
+}
+
+/**
+  * @brief  固件升级寄存器区读（03/04 功能码）：该区不在 regHoldingBuf 里，由 mb_fwupd 现算
+  * @param  _mbs  从机结构体
+  * @param  reg   起始地址
+  * @param  num   寄存器个数
+  * @retval None
+  */
+static void mbs_fwu_read(mbs *_mbs, uint16_t reg, uint16_t num)
+{
+    uint16_t regs[FWU_REG_INFO_COUNT];
+    uint16_t i;
+
+    if (_mbs->rspCode == RSP_OK)
+        _mbs->rspCode = (num > FWU_REG_INFO_COUNT) ? RSP_ERR_REG_ADDR : fwu_read_regs(reg, num, regs);
+
+    _mbs->txBuf[_mbs->txLen++] = _mbs->rxBuf[0];
+    if (_mbs->rspCode == RSP_OK)
+    {
+        _mbs->txBuf[_mbs->txLen++] = _mbs->rxBuf[1];
+        _mbs->txBuf[_mbs->txLen++] = num * 2;
+        for (i = 0; i < num; i++)
+        {
+            _mbs->txBuf[_mbs->txLen++] = regs[i] >> 8;
+            _mbs->txBuf[_mbs->txLen++] = regs[i] & 0xFF;
+        }
+    }
+    else
+    {
+        _mbs->txBuf[_mbs->txLen++] = _mbs->rxBuf[1] | 0x80;
+        _mbs->txBuf[_mbs->txLen++] = _mbs->rspCode;
+    }
+
+    mbs_send(_mbs);
+}
+
+/**
+  * @brief  固件升级寄存器区写（06/10 功能码）：不经过 mbs_hook_extract_holding，
+  *         因此不受 WRITE_HOLDING_V 与"上电回原点未完成"的写入限制；BEGIN/FINISH 会擦写 Flash，
+  *         阻塞约 0.3~2s 后才应答
+  * @param  _mbs  从机结构体
+  * @param  reg   起始地址
+  * @param  num   寄存器个数
+  * @param  data  帧中的寄存器数据（每寄存器高字节在前）
+  * @retval None
+  */
+static void mbs_fwu_write(mbs *_mbs, uint16_t reg, uint16_t num, const uint8_t *data)
+{
+    uint8_t i;
+
+    if (_mbs->rspCode == RSP_OK)
+        _mbs->rspCode = fwu_write_regs(reg, num, data);
+
+    if (_mbs->rspCode == RSP_OK)
+    {
+        for (i = 0; i < 6; i++)
+        {
+            _mbs->txBuf[i] = _mbs->rxBuf[i];
+            _mbs->txLen++;
+        }
+    }
+    else
+    {
+        _mbs->txBuf[_mbs->txLen++] = _mbs->rxBuf[0];
+        _mbs->txBuf[_mbs->txLen++] = _mbs->rxBuf[1] | 0x80;
+        _mbs->txBuf[_mbs->txLen++] = _mbs->rspCode;
+    }
+
+    mbs_send(_mbs);
 }
 
 /**
@@ -204,6 +275,12 @@ void mods_03h(mbs *_mbs)
 
     reg = ((uint16_t)_mbs->rxBuf[2] << 8) | _mbs->rxBuf[3];  /* 寄存器号 */
     num = ((uint16_t)_mbs->rxBuf[4] << 8) | _mbs->rxBuf[5];  /* 寄存器个数 */
+
+    if (FWU_IS_REG(reg))
+    {
+        mbs_fwu_read(_mbs, reg, num);
+        return;
+    }
 
     /* 如果改变的数据在寄存器范围内,则更新数据 */
     if ((num > 0) && (reg + num <= REG_HOLDING_NREGS))
@@ -371,6 +448,12 @@ void mods_06h(mbs *_mbs)
 
     reg = ((uint16_t)_mbs->rxBuf[2] << 8) | _mbs->rxBuf[3];  /* 寄存器号 */
     value = ((uint16_t)_mbs->rxBuf[4] << 8) | _mbs->rxBuf[5];  /* 寄存器值 */
+
+    if (FWU_IS_REG(reg))
+    {
+        mbs_fwu_write(_mbs, reg, 1, &_mbs->rxBuf[4]);
+        return;
+    }
 
     /* 如果改变的数据在寄存器范围内,则写入寄存器数据 */
     if (reg < REG_HOLDING_NREGS)
@@ -545,6 +628,14 @@ void mods_10h(mbs *_mbs)
     if (byte_num != 2 * reg_num)
     {
         _mbs->rspCode = RSP_ERR_VALUE; /* 数据值域错误 */
+    }
+
+    if (FWU_IS_REG(reg_addr))
+    {
+        if (_mbs->rxCounter != 9 + byte_num)
+            _mbs->rspCode = RSP_ERR_VALUE;
+        mbs_fwu_write(_mbs, reg_addr, reg_num, &_mbs->rxBuf[7]);
+        return;
     }
 
     for (i = 0; i < reg_num; i++)

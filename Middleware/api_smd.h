@@ -313,6 +313,9 @@ HAL_StatusTypeDef SMD_PWM_SetFreq(SMD_Channel ch, uint32_t freq);
   */
 uint32_t SMD_GetPulseTotal(SMD_Channel ch);
 
+/* 是否有步进通道正在输出脉冲（舵机通道除外）：固件升级擦写 Flash 前检查，见 mb_fwupd.h */
+uint8_t SMD_AnyOutputOn(void);
+
 /* ==================== 排发皮带零点 / 一圈步数（ch4 黑点） ====================
  * 排发皮带侧涂黑点，漫反射光电 ch4（Incom_Ch4，触发=高电平）检测。1ms 中断里消抖
  * 检测黑点前沿（正转 ch4 上升沿 / 反转 ch4 下降沿，同一物理位置），记下当时的皮带脉冲总数

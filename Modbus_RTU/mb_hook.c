@@ -12,6 +12,8 @@
 #include "mb_host.h"
 #include "api_smd.h"
 #include "api_motor_control.h"
+#include "mb_fwupd.h"
+#include "fw_version.h"
 
 /* 私有函数实现 ------------------------------------------------------------*/
 
@@ -57,6 +59,19 @@ static const int8_t smd_slot_phys_ch[SMD_SLOT_COUNT] = {
     SMD_SLOT_6_PHYS_CH - 1,
     SMD_SLOT_7_PHYS_CH - 1,
     SMD_SLOT_8_PHYS_CH - 1,
+};
+
+/* 固件信息：上位机在 U 盘 .bin 里按 magic 找到本结构，读板型与版本，确认是本板固件再升级；
+ * main.c 把版本号交给 fwu_init，经升级信息寄存器回读（版本号改 fw_version.h） */
+const fwu_info_t g_fwuInfo =
+{
+    FWU_INFO_MAGIC,
+    FWU_BOARD_ID,
+    FW_VERSION_MAJOR,
+    FW_VERSION_MINOR,
+    FW_VERSION_PATCH,
+    __DATE__,
+    __TIME__,
 };
 
 /* 导出函数实现 ------------------------------------------------------------*/
@@ -479,6 +494,21 @@ void mbs_hook_belt_mirror(uint16_t dr, uint16_t pu)
         if (dr != BELT_MIRROR_KEEP) mbsUSB.regHoldingBuf[SMD_SLOT_DR_ADDR(slot)] = dr;
         mbsUSB.regHoldingBuf[SMD_SLOT_PU_ADDR(slot)] = pu;
     }
+}
+
+/**
+  * @brief  固件升级擦写 Flash 前的检查（mb_fwupd 调用）：擦写期间 CPU 停顿，运行中的
+  *         步进电机会丢步数/脉冲计数、舵机流程会卡住，所以有任何电机在动就拒绝
+  * @retval 1=有电机在运行
+  */
+uint8_t fwu_port_busy(void)
+{
+#if M6TOSERVO_ENABLE
+    if (SMD_Servo_IsRunning()) return 1;
+#endif
+    return (SMD_AnyOutputOn() ||
+            API_MOTOR_GetCurrentSpeed(API_MOTOR_1) != 0 ||
+            API_MOTOR_GetCurrentSpeed(API_MOTOR_2) != 0) ? 1u : 0u;
 }
 
 /**

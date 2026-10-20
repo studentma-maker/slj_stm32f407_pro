@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "mb_slave.h"
+#include "mb_fwupd.h"
 
 /* 值<->功能码：WRITE_HOLDING_V 保持不变，上位机批量写寄存器时用该值标记
  * "此寄存器保持不变"，下位机收到该值直接跳过，避免误改（沿用旧项目约定） */
@@ -273,6 +274,9 @@
   */
 #define BELT_MIRROR_KEEP  0xFFFFu
 void mbs_hook_belt_mirror(uint16_t dr, uint16_t pu);
+
+/* 应用程序固件信息（版本见 fw_version.h），定义在 mb_hook.c */
+extern const fwu_info_t g_fwuInfo;
 
 void mbh_hook_rec01(uint8_t add, uint8_t *data, uint8_t datalen);
 void mbh_hook_rec02(uint8_t add, uint8_t *data, uint8_t datalen);

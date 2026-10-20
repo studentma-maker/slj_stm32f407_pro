@@ -80,9 +80,9 @@
             <nStopB2X>0</nStopB2X>
           </BeforeMake>
           <AfterMake>
-            <RunUserProg1>0</RunUserProg1>
+            <RunUserProg1>1</RunUserProg1>
             <RunUserProg2>1</RunUserProg2>
-            <UserProg1Name></UserProg1Name>
+            <UserProg1Name>fromelf --bin -o "$Lslj_mcu.bin" "#L"</UserProg1Name>
             <UserProg2Name></UserProg2Name>
             <UserProg1Dos16Mode>0</UserProg1Dos16Mode>
             <UserProg2Dos16Mode>0</UserProg2Dos16Mode>
@@ -275,8 +275,8 @@
               </OCR_RVCT3>
               <OCR_RVCT4>
                 <Type>1</Type>
-                <StartAddress>0x8000000</StartAddress>
-                <Size>0x80000</Size>
+                <StartAddress>0x8010000</StartAddress>
+                <Size>0x30000</Size>
               </OCR_RVCT4>
               <OCR_RVCT5>
                 <Type>1</Type>
@@ -589,6 +589,11 @@
               <FileName>mb_slave.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Modbus_RTU\mb_slave.c</FilePath>
+            </File>
+            <File>
+              <FileName>mb_fwupd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Modbus_RTU\mb_fwupd.c</FilePath>
             </File>
           </Files>
         </Group>
