@@ -3,7 +3,7 @@
   * @brief   SMD API 接口头文件
   * @details 6 路步进电机 S 曲线加减速 + 步数控制。
   *          移植自 slj_stm32f407 项目 Core/Src/smd.c（8路版本），
-  *          裁剪为本板 6 路通道，核心 S 曲线算法与步数控制逻辑保持一致，
+  *          裁剪为本板 6 路通道；夹爪增加硬件计步/门控截止及动态刹车规划，
   *          上位机仅需更换 Modbus 寄存器地址映射即可复用原有控制协议。
   *          另支持 M6TOSERVO_ENABLE=1 时把物理6号通道（SMD_CH5，PA1/TIM2_CH2）
   *          改造为舵机控制：Modbus 槽位6寄存器重定义为 初始角度/角度a/角度b/
@@ -208,6 +208,10 @@ extern SMD_StepsCtl_t g_motorStepsCtl[SMD_CH_MAX];
 extern GrippertoOrigin_P g_sysToOrigin;
 
 /* 导出函数声明 ------------------------------------------------------------*/
+
+/* Call after PWM timer initialization and before starting TIM10 scheduling.
+ * TIM5_CH4/PA3 -> internal CH1 reference -> TIM3; no external wire. */
+void SMD_GripperCounterInit(void);
 
 #if M6TOSERVO_ENABLE
 /* 以下舵机接口仅 M6TOSERVO_ENABLE=1 时编译，寄存器语义见本文件

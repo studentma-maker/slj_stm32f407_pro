@@ -4,7 +4,7 @@
   * @details 6路步进电机 S 曲线加减速 + 步数控制核心实现。
   *          移植自 slj_stm32f407 项目 Core/Src/smd.c（8路S曲线版本），
   *          按本板 6 路通道与 EN/AM 信号重新适配：
-  *            - S曲线速度更新 / 换向保护 / 步数控制刹车预判：逻辑与原项目一致
+  *            - 夹爪采用 TIM3 硬件计步/门控截止及动态 S 曲线刹车，其余轴沿用原逻辑
   *            - 上电回原点状态机（SMD_SysToOrigin）与限位急停（SMD_IsLimited）：
   *              沿用原项目对应机械结构（进退/夹爪）的判定逻辑，
   *              IN/OUT 序号沿用原项目编号，需与实际线束核对
@@ -26,6 +26,7 @@
 #include "api_eeprom.h"
 #include "mb_hook.h"
 #include <math.h>
+#include "smd_gripper_profile.h"
 
 /* ========================= 硬件定时器映射表 ========================= */
 /**
@@ -150,6 +151,130 @@ static void SMD_MotorStepsCtl   (SMD_Channel ch);
 static void SMD_SysToOrigin     (void);
 static void SMD_ProcessChannel  (SMD_Channel ch);
 static void SMD_RunSCurve       (SMD_Channel ch, SMD_Freq_Gradient *m);
+
+/* TIM5_CH4 drives PA3 (PWM1). The unused CH1 is PWM2 with the same
+ * compare value: OC1REF rises when PA3 falls, i.e. after a complete pulse.
+ * TIM5 TRGO -> TIM3 ITR2 counts completed pulses. TIM3 TRGO=ENABLE ->
+ * TIM5 ITR1 gates the PWM clock. In finite mode TIM3 OPM stops at pulse N,
+ * closing the gate with PA3 already low. No CPU latency in the cutoff. */
+static uint8_t s_gripperCounterReady;
+static uint16_t s_gripperLastCount;
+static uint32_t s_gripperCountPeriod = 65536u;
+static uint8_t s_gripperFinite;
+static volatile uint8_t s_gripperDone;
+static uint16_t s_gripperArmedTarget;
+static float s_gripperAcceleration;
+static uint32_t s_gripperRequestedPulses;
+
+static void SMD_GripperAddPulses(uint32_t pulses)
+{
+    uint32_t position = MotorCurStepsU[MOTOR_GripperMove];
+    MotorPulseTotal[MOTOR_GripperMove] += pulses;
+    if (SMD_DR_READ(MOTOR_GripperMove))
+    {
+        position += pulses;
+        if (position > 65535u) position = 65535u;
+    }
+    else position = position > pulses ? position - pulses : 0u;
+    MotorCurStepsU[MOTOR_GripperMove] = (uint16_t)position;
+}
+
+/* Caller masks interrupts; hardware may still run during the snapshot. */
+static void SMD_GripperCollect(void)
+{
+    uint32_t before, after, count, pulses;
+    if (!s_gripperCounterReady) return;
+    do
+    {
+        before = TIM3->SR & TIM_SR_UIF;
+        count = TIM3->CNT;
+        after = TIM3->SR & TIM_SR_UIF;
+    } while (before != after);
+    if (after)
+    {
+        pulses = s_gripperCountPeriod - s_gripperLastCount + count;
+        TIM3->SR = ~(uint32_t)TIM_SR_UIF;
+        if (s_gripperFinite) s_gripperDone = 1u;
+    }
+    else pulses = (uint16_t)(count - s_gripperLastCount);
+    s_gripperLastCount = (uint16_t)count;
+    SMD_GripperAddPulses(pulses);
+}
+
+void SMD_GripperCounterInit(void)
+{
+    __HAL_RCC_TIM3_CLK_ENABLE();
+    TIM3->CR1 = 0;
+    TIM3->CR2 = TIM_TRGO_ENABLE;
+    TIM3->SMCR = TIM_TS_ITR2 | TIM_SLAVEMODE_EXTERNAL1;
+    TIM3->PSC = 0;
+    TIM3->ARR = 65535u;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SR = 0;
+    TIM3->DIER = TIM_DIER_UIE;
+
+    /* CH1 stays internal: no CC1E, GPIO or additional wire. */
+    TIM5->CCMR1 = (TIM5->CCMR1 & ~(TIM_CCMR1_CC1S | TIM_CCMR1_OC1M)) |
+                  TIM_OCMODE_PWM2 | TIM_CCMR1_OC1PE;
+    TIM5->CCR1 = TIM5->CCR4;
+    TIM5->CR2 = (TIM5->CR2 & ~TIM_CR2_MMS) | TIM_TRGO_OC1REF;
+    TIM5->SMCR = (TIM5->SMCR & ~(TIM_SMCR_TS | TIM_SMCR_SMS)) |
+                 TIM_TS_ITR1 | TIM_SLAVEMODE_GATED;
+    s_gripperCounterReady = 1u;
+    HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
+    HAL_NVIC_ClearPendingIRQ(TIM3_IRQn);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+}
+
+void TIM3_IRQHandler(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    SMD_GripperCollect();
+    __set_PRIMASK(primask);
+}
+
+static void SMD_GripperPrepareCounter(uint32_t pulses)
+{
+    TIM3->CR1 = 0;
+    s_gripperFinite = pulses != 0u;
+    /* ARR=0 blocks counting on STM32 timers. Start finite moves at CNT=1,
+     * ARR=N so even a single-pulse move uses a nonzero auto-reload value. */
+    s_gripperCountPeriod = pulses ? pulses + 1u : 65536u;
+    TIM3->ARR = s_gripperCountPeriod - 1u;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SR = 0;
+    TIM3->CNT = pulses ? 1u : 0u;
+    s_gripperLastCount = pulses ? 1u : 0u;
+    s_gripperDone = 0;
+    /* Flush both channel preloads while the pulse output is disabled. */
+    TIM5->EGR = TIM_EGR_UG;
+    /* Start at zero: OC1REF (PWM2) is low. Enabling CH4 starts the first
+     * high pulse, whose falling edge is the first event counted by TIM3.
+     * Do not preload CNT into PWM2's active half: that could create a
+     * reference rising edge during startup without an output pulse. */
+    TIM5->CNT = 0;
+    TIM3->CR1 = pulses ? TIM_CR1_OPM : 0u;
+    TIM3->CR1 |= TIM_CR1_CEN;
+}
+
+static void SMD_GripperFinish(void)
+{
+    SMD_Freq_Gradient *m = &smd_freq_gradient[MOTOR_GripperMove];
+    SMD_PWM_Stop(MOTOR_GripperMove);
+    m->v_c = 0.0f;
+    m->v_n = (float)SMD_PWM_FREQ_MIN;
+    m->a_c = 0.0f;
+    m->is_running = 0;
+    m->dir_change = 0;
+    m->dir_state = SMD_DIR_NORMAL;
+    m->current_freq_int = SMD_PWM_FREQ_MIN;
+    SMD_PU_DATA[MOTOR_GripperMove] = SMD_PWM_FREQ_MIN;
+    g_motorStepsCtl[MOTOR_GripperMove].is_running = 0;
+    g_motorStepsCtl[MOTOR_GripperMove].braking = 0;
+    s_gripperAcceleration = 0.0f;
+    s_gripperDone = 0;
+}
 /* SMD_CheckRelayMotorLimit(void); -- 旧板OUT11/12继电器料车电机方案已停用，
  * M1/M2 PWM方案已调通，见下方函数定义处的注释 */
 
@@ -186,6 +311,7 @@ static void SMD_Calc_PSC_ARR(uint32_t freq, uint32_t *psc, uint32_t *arr, int ch
 /* ========================= 内部：步数累加（子步定点累加，消除浮点误差） ========================= */
 static void SMD_AccumulateSteps(SMD_Channel ch, uint32_t freq_int)
 {
+    if (ch == MOTOR_GripperMove) return; /* TIM3 counts actual pulses. */
     MotorCurStepsSub[ch] += freq_int;  /* freq_int 子步/ms，1000子步 = 1整步 */
     uint16_t whole = (uint16_t)(MotorCurStepsSub[ch] / 1000u);
     uint8_t dir = SMD_DR_READ(ch);
@@ -230,6 +356,7 @@ static void SMD_PulseCountTick(void)
 {
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
     {
+        if (ch == MOTOR_GripperMove) continue; /* Hardware counter, not integration. */
 #if M6TOSERVO_ENABLE
         if (ch == SERVO_CH) continue;  /* 舵机通道：50Hz是伺服信号不是步进脉冲，不计数 */
 #endif
@@ -290,9 +417,23 @@ static void SMD_ApplyFreqToHW(SMD_Channel ch, uint32_t freq_int)
     SMD_Calc_PSC_ARR(freq_int, &psc, &arr, (int)ch);
 
     const SMD_TimerMap *t = &smd_timer_map[ch];
+    uint32_t update_disabled = 0;
+    if (ch == MOTOR_GripperMove)
+    {
+        /* Keep CH4 and its internal counting reference on the same cycle.
+         * Masking CPU interrupts alone cannot prevent a timer overflow
+         * between the two preload writes. UDIS prevents that partial latch. */
+        update_disabled = TIM5->CR1 & TIM_CR1_UDIS;
+        TIM5->CR1 |= TIM_CR1_UDIS;
+    }
     t->handle->Instance->PSC = psc;
     t->handle->Instance->ARR = arr;
     __HAL_TIM_SET_COMPARE(t->handle, t->tim_channel, arr / 2);  // 保持50%占空比
+    if (ch == MOTOR_GripperMove)
+    {
+        TIM5->CCR1 = arr / 2;
+        if (!update_disabled) TIM5->CR1 &= ~TIM_CR1_UDIS;
+    }
 
     smd_freq_gradient[ch].current_freq_int = freq_int;
     SMD_AccumulateSteps(ch, freq_int);
@@ -335,6 +476,23 @@ HAL_StatusTypeDef SMD_PWM_Start(SMD_Channel ch)
 {
     if (ch >= SMD_CH_MAX) return HAL_ERROR;
     const SMD_TimerMap *t = &smd_timer_map[ch];
+    if (ch == MOTOR_GripperMove)
+    {
+        uint32_t primask = __get_PRIMASK();
+        HAL_StatusTypeDef status;
+        if (!s_gripperCounterReady) return HAL_ERROR;
+        __disable_irq();
+        if (TIM5->CCER & TIM_CCER_CC4E)
+        {
+            __set_PRIMASK(primask);
+            return HAL_OK;
+        }
+        SMD_GripperPrepareCounter(s_gripperRequestedPulses);
+        status = HAL_TIM_PWM_Start(t->handle, t->tim_channel);
+        if (status != HAL_OK) TIM3->CR1 &= ~TIM_CR1_CEN;
+        __set_PRIMASK(primask);
+        return status;
+    }
     return t->is_complementary ? HAL_TIMEx_PWMN_Start(t->handle, t->tim_channel)
                                 : HAL_TIM_PWM_Start   (t->handle, t->tim_channel);
 }
@@ -343,6 +501,26 @@ HAL_StatusTypeDef SMD_PWM_Stop(SMD_Channel ch)
 {
     if (ch >= SMD_CH_MAX) return HAL_ERROR;
     const SMD_TimerMap *t = &smd_timer_map[ch];
+    if (ch == MOTOR_GripperMove && s_gripperCounterReady)
+    {
+        uint32_t primask = __get_PRIMASK();
+        HAL_StatusTypeDef status;
+        __disable_irq();
+        TIM3->CR1 &= ~TIM_CR1_CEN; /* Freeze PWM before settling the old direction. */
+        SMD_GripperCollect();
+        /* An interrupted high pulse already delivered its rising STEP edge.
+         * Its falling edge is forced by Stop and will not reach the counter. */
+        /* Read the actual pin, not CNT < CCR4: CCR4 may contain the next
+         * period's preload rather than the currently active compare value. */
+        if ((TIM5->CCER & TIM_CCER_CC4E) && (TIM5->CR1 & TIM_CR1_CEN) &&
+            HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_SET)
+            SMD_GripperAddPulses(1u);
+        status = HAL_TIM_PWM_Stop(t->handle, t->tim_channel);
+        s_gripperFinite = 0;
+        s_gripperDone = 0;
+        __set_PRIMASK(primask);
+        return status;
+    }
     return t->is_complementary ? HAL_TIMEx_PWMN_Stop(t->handle, t->tim_channel)
                                 : HAL_TIM_PWM_Stop   (t->handle, t->tim_channel);
 }
@@ -641,6 +819,12 @@ HAL_StatusTypeDef SMD_PWM_SetFreq(SMD_Channel ch, uint32_t freq)
     ret = HAL_TIM_PWM_Init(t->handle);
     if (ret != HAL_OK) return ret;
 
+    if (ch == MOTOR_GripperMove)
+    {
+        TIM5->CCR4 = arr / 2u;
+        TIM5->CCR1 = arr / 2u;
+    }
+
     smd_freq_gradient[ch].current_freq_int = freq;
 
     return SMD_PWM_Start(ch);
@@ -911,6 +1095,151 @@ static void SMD_MotorStepsCtl(SMD_Channel ch)
         if (freq_int == BRAKE_TARGET_HZ)
             g_motorStepsCtl[ch].braking = 1;
     }
+}
+
+/* Finite gripper moves use a signed-acceleration profile and a hardware pulse
+ * budget. Return 1 when this tick belongs to the new position controller;
+ * limit-seeking (0/0xffff) and continuous speed commands retain their behavior. */
+static uint8_t SMD_GripperPositionTick(void)
+{
+    const SMD_Channel ch = MOTOR_GripperMove;
+    SMD_Freq_Gradient *m = &smd_freq_gradient[ch];
+    SMD_StepsCtl_t *ctl = &g_motorStepsCtl[ch];
+    uint32_t primask = __get_PRIMASK();
+    int32_t remaining;
+    uint32_t distance;
+    uint8_t direction;
+    float end_v, target, brake, guard;
+    __disable_irq();
+    SMD_GripperCollect();
+    __set_PRIMASK(primask);
+
+    if (s_gripperDone)
+    {
+        if (ctl->is_running && ctl->targetSteps == s_gripperArmedTarget)
+        {
+            SMD_GripperFinish();
+            return 1;
+        }
+        /* A new STEP command arrived before the old move's completion tick. */
+        SMD_PWM_Stop(ch);
+        m->v_c = 0.0f;
+        m->a_c = 0.0f;
+        s_gripperAcceleration = 0.0f;
+    }
+    if (!ctl->is_running || ctl->targetSteps == 0u || ctl->targetSteps == 0xffffu)
+    {
+        /* A finite budget must not survive a switch to limit-seeking mode. */
+        if (s_gripperFinite)
+        {
+            SMD_PWM_Stop(ch);
+            m->v_c = 0.0f;
+            m->a_c = 0.0f;
+        }
+        s_gripperAcceleration = 0.0f;
+        return 0;
+    }
+    /* PU=1 retains the existing decelerate/stop meaning. Keep the target
+     * pending so a later PU write can resume from the actual stopped position. */
+    if (SMD_PU_DATA[ch] <= SMD_PWM_FREQ_MIN)
+    {
+        if (SMD_PWM_IsOutputOn(ch) && m->v_c > 50.0f)
+        {
+            if (SMD_IsLimited(ch, (uint8_t)SMD_DR_READ(ch), m)) return 1;
+            m->v_c = SMD_GripperProfileTick(m->v_c, &s_gripperAcceleration,
+                       50.0f, SMD_ACC_DATA[ch], SMD_JERK_DATA[ch], SMD_UPDATE_DT_s);
+            m->a_c = fabsf(s_gripperAcceleration);
+            SMD_ApplyFreqToHW(ch, (uint32_t)(m->v_c + 0.5f));
+        }
+        else
+        {
+            SMD_PWM_Stop(ch);
+            m->v_c = 0.0f;
+            m->a_c = 0.0f;
+            m->is_running = 0;
+            s_gripperAcceleration = 0.0f;
+        }
+        return 1;
+    }
+    remaining = (int32_t)ctl->targetSteps - MotorCurStepsU[ch];
+    direction = remaining > 0 ? 1u : 0u;
+
+    /* Retargeting or entering position mode from continuous motion: first
+     * decelerate in the old direction, then re-arm from the settled position.
+     * The old finite budget stays as an independent hardware travel bound. */
+    if (SMD_PWM_IsOutputOn(ch) &&
+        (!s_gripperFinite || ctl->targetSteps != s_gripperArmedTarget ||
+         (remaining != 0 && direction != (uint8_t)SMD_DR_READ(ch))))
+    {
+        if (SMD_IsLimited(ch, (uint8_t)SMD_DR_READ(ch), m)) return 1;
+        if (m->v_c > 50.0f)
+        {
+            m->v_c = SMD_GripperProfileTick(m->v_c, &s_gripperAcceleration,
+                       50.0f, SMD_ACC_DATA[ch], SMD_JERK_DATA[ch], SMD_UPDATE_DT_s);
+            m->a_c = fabsf(s_gripperAcceleration);
+            SMD_ApplyFreqToHW(ch, (uint32_t)(m->v_c + 0.5f));
+            return 1;
+        }
+        SMD_PWM_Stop(ch);
+        m->v_c = 0.0f;
+        m->a_c = 0.0f;
+        s_gripperAcceleration = 0.0f;
+        return 1; /* Direction is changed on the following 1ms tick. */
+    }
+    if (remaining == 0)
+    {
+        SMD_GripperFinish();
+        return 1;
+    }
+    if (!SMD_PWM_IsOutputOn(ch))
+    {
+        if (direction != (uint8_t)SMD_DR_READ(ch))
+        {
+            SMD_DR(ch, direction);
+            m->dir_change = 0;
+            m->dir_state = SMD_DIR_NORMAL;
+            return 1; /* At least 1ms DIR setup before first STEP. */
+        }
+        if (SMD_IsLimited(ch, direction, m)) return 1;
+        distance = (uint32_t)(remaining > 0 ? remaining : -remaining);
+        s_gripperArmedTarget = ctl->targetSteps;
+        ctl->braking = 0;
+        s_gripperAcceleration = 0.0f;
+        m->v_c = 50.0f;
+        m->a_c = 0.0f;
+        m->dir_change = 0;
+        m->dir_state = SMD_DIR_NORMAL;
+        SMD_ApplyFreqToHW(ch, 50u);
+        s_gripperRequestedPulses = distance;
+        if (SMD_PWM_Start(ch) != HAL_OK)
+        {
+            s_gripperRequestedPulses = 0;
+            SMD_GripperFinish();
+            return 1;
+        }
+        s_gripperRequestedPulses = 0;
+        m->is_running = 1;
+        return 1;
+    }
+    if (SMD_IsLimited(ch, direction, m)) return 1;
+    distance = (uint32_t)(remaining > 0 ? remaining : -remaining);
+    target = SMD_PU_DATA[ch]; /* Keep the commanded cruise speed unchanged. */
+    if (target < 50.0f) target = 50.0f;
+    end_v = target < (float)BRAKE_TARGET_HZ ? target : (float)BRAKE_TARGET_HZ;
+    brake = SMD_GripperBrakeDistance(m->v_c, s_gripperAcceleration, end_v,
+                                     SMD_ACC_DATA[ch], SMD_JERK_DATA[ch]);
+    /* One PWM preload period + discrete planner delay + rounding allowance.
+     * Unlike the old 100-pulse constant this shrinks with current speed. */
+    guard = m->v_c * 0.003f + 2.0f;
+    if ((float)distance <= brake + guard) ctl->braking = 1;
+    if (ctl->braking) target = end_v;
+    m->v_n = target;
+    m->acc_max = SMD_ACC_DATA[ch];
+    m->v_c = SMD_GripperProfileTick(m->v_c, &s_gripperAcceleration, target,
+                                   m->acc_max, SMD_JERK_DATA[ch], SMD_UPDATE_DT_s);
+    m->a_c = fabsf(s_gripperAcceleration);
+    SMD_ApplyFreqToHW(ch, (uint32_t)(m->v_c + 0.5f));
+    return 1;
 }
 
 /* ========================= 内部：上电回原点状态机 ========================= */
@@ -1604,8 +1933,11 @@ void TIM1_UP_TIM10_IRQHandler(void)
     if (__HAL_TIM_GET_FLAG(&htim10, TIM_FLAG_UPDATE) == RESET) return;
     __HAL_TIM_CLEAR_FLAG(&htim10, TIM_FLAG_UPDATE);
 
+    uint8_t gripper_position_tick = SMD_GripperPositionTick();
+
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
     {
+        if (ch == MOTOR_GripperMove && gripper_position_tick) continue;
 #if M6TOSERVO_ENABLE
         if (ch == SERVO_CH) continue;  /* 舵机通道：不走步进S曲线/换向/限位逻辑 */
 #endif
@@ -1614,6 +1946,7 @@ void TIM1_UP_TIM10_IRQHandler(void)
 
     for (int ch = 0; ch < SMD_CH_MAX; ch++)
     {
+        if (ch == MOTOR_GripperMove && gripper_position_tick) continue;
 #if M6TOSERVO_ENABLE
         if (ch == SERVO_CH) continue;  /* 舵机通道：不支持步数控制 */
 #endif

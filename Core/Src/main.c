@@ -159,6 +159,7 @@ int main(void)
     /* 开机找零：排发皮带以 BELT_ZERO_FREQ 转到 ch4 黑点（零点当场锁存）后减速停，137 皮带进度随即有效 */
     SMD_Belt_SeekZeroStart();
 
+    SMD_GripperCounterInit();
     HAL_TIM_Base_Start_IT(&htim10);
     HAL_TIM_Base_Start_IT(&htim11);
     /* USER CODE END 2 */
